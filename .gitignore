@@ -51,3 +51,4 @@ main-app/backend/product_files_for_desktop.txt
 main-app/frontend/public/v86/alpine-virt.iso
 main-app/osjs/node_modules/
 main-app/osjs/dist/
+.claude/

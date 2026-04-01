@@ -10,6 +10,11 @@ import SOPs from './pages/SOPs'
 import Documentation from './pages/Documentation'
 import Settings from './pages/Settings'
 import McpBuilder from './pages/McpBuilder'
+import BrainsDashboard from './pages/BrainsDashboard'
+import BrainGallery from './pages/BrainGallery'
+import BrainSetup from './pages/BrainSetup'
+import BrainDetail from './pages/BrainDetail'
+import BrainApprovals from './pages/BrainApprovals'
 import Login from './pages/Login'
 import { Loader2 } from 'lucide-react'
 
@@ -50,6 +55,11 @@ function App() {
         <Route path="docs" element={<Documentation />} />
         <Route path="settings" element={<Settings />} />
         <Route path="mcp-builder" element={<McpBuilder />} />
+        <Route path="brains" element={<BrainsDashboard />} />
+        <Route path="brains/new" element={<BrainGallery />} />
+        <Route path="brains/:brainId/setup" element={<BrainSetup />} />
+        <Route path="brains/:brainId" element={<BrainDetail />} />
+        <Route path="brains/approvals" element={<BrainApprovals />} />
       </Route>
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>

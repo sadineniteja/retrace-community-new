@@ -394,4 +394,179 @@ export const channelApi = {
   },
 }
 
+// ── Brain Platform API ─────────────────────────────────────────────
+
+export const brainApi = {
+  // Templates
+  listTemplates: async () => {
+    const r = await api.get('/brains/templates')
+    return r.data
+  },
+  getTemplate: async (slug: string) => {
+    const r = await api.get(`/brains/templates/${slug}`)
+    return r.data
+  },
+
+  // Brain CRUD
+  listBrains: async (status?: string) => {
+    const r = await api.get('/brains', { params: status ? { status_filter: status } : {} })
+    return r.data
+  },
+  getBrain: async (brainId: string) => {
+    const r = await api.get(`/brains/${brainId}`)
+    return r.data
+  },
+  createBrain: async (data: { name: string; template_slug?: string; template_id?: string; description?: string; autonomy_level?: string }) => {
+    const r = await api.post('/brains', data)
+    return r.data
+  },
+  updateBrain: async (brainId: string, data: Record<string, unknown>) => {
+    const r = await api.put(`/brains/${brainId}`, data)
+    return r.data
+  },
+  deleteBrain: async (brainId: string) => {
+    await api.delete(`/brains/${brainId}`)
+  },
+  activateBrain: async (brainId: string) => {
+    const r = await api.post(`/brains/${brainId}/activate`)
+    return r.data
+  },
+  pauseBrain: async (brainId: string) => {
+    const r = await api.post(`/brains/${brainId}/pause`)
+    return r.data
+  },
+
+  // Interview
+  getInterview: async (brainId: string) => {
+    const r = await api.get(`/brains/${brainId}/interview`)
+    return r.data
+  },
+  submitAnswer: async (brainId: string, key: string, value: unknown) => {
+    const r = await api.post(`/brains/${brainId}/interview/answer`, { key, value })
+    return r.data
+  },
+  completeInterview: async (brainId: string) => {
+    const r = await api.post(`/brains/${brainId}/interview/complete`)
+    return r.data
+  },
+  resetInterview: async (brainId: string) => {
+    const r = await api.post(`/brains/${brainId}/interview/reset`)
+    return r.data
+  },
+
+  // Connected Accounts
+  listAccounts: async (brainId: string) => {
+    const r = await api.get(`/brains/${brainId}/accounts`)
+    return r.data
+  },
+  startOAuth: async (brainId: string, provider: string, redirectUri: string) => {
+    const r = await api.post(`/brains/${brainId}/accounts/oauth/start`, { provider, redirect_uri: redirectUri })
+    return r.data
+  },
+  oauthCallback: async (brainId: string, code: string, state: string) => {
+    const r = await api.post(`/brains/${brainId}/accounts/oauth/callback`, { code, state })
+    return r.data
+  },
+  storeApiKey: async (brainId: string, data: { provider: string; api_key: string; api_secret?: string; display_name?: string }) => {
+    const r = await api.post(`/brains/${brainId}/accounts/api-key`, data)
+    return r.data
+  },
+  disconnectAccount: async (brainId: string, accountId: string) => {
+    await api.delete(`/brains/${brainId}/accounts/${accountId}`)
+  },
+  browserLoginStart: async (brainId: string, provider: string) => {
+    const r = await api.post(`/brains/${brainId}/accounts/browser-login/start`, { provider })
+    return r.data
+  },
+  browserLoginCapture: async (brainId: string) => {
+    const r = await api.post(`/brains/${brainId}/accounts/browser-login/capture`)
+    return r.data
+  },
+
+  // Tasks
+  listTasks: async (brainId: string, statusFilter?: string, limit = 50) => {
+    const r = await api.get(`/brains/${brainId}/tasks`, { params: { status_filter: statusFilter, limit } })
+    return r.data
+  },
+  createTask: async (brainId: string, data: { title: string; instructions: string; task_type?: string; priority?: number }) => {
+    const r = await api.post(`/brains/${brainId}/tasks`, data)
+    return r.data
+  },
+  cancelTask: async (brainId: string, taskId: string) => {
+    const r = await api.post(`/brains/${brainId}/tasks/${taskId}/cancel`)
+    return r.data
+  },
+
+  // Approvals
+  listApprovals: async (status = 'pending', brainId?: string) => {
+    const r = await api.get('/approvals', { params: { status_filter: status, brain_id: brainId } })
+    return r.data
+  },
+  decideApproval: async (requestId: string, approved: boolean, denialReason?: string) => {
+    const r = await api.post(`/approvals/${requestId}/decide`, { approved, denial_reason: denialReason })
+    return r.data
+  },
+  pendingApprovalCount: async () => {
+    const r = await api.get('/approvals/count/pending')
+    return r.data
+  },
+
+  // Monitors
+  listMonitors: async (brainId: string) => {
+    const r = await api.get(`/brains/${brainId}/monitors`)
+    return r.data
+  },
+  createMonitor: async (brainId: string, data: Record<string, unknown>) => {
+    const r = await api.post(`/brains/${brainId}/monitors`, data)
+    return r.data
+  },
+  deleteMonitor: async (brainId: string, monitorId: string) => {
+    await api.delete(`/brains/${brainId}/monitors/${monitorId}`)
+  },
+
+  // Pipeline
+  listPipeline: async (brainId: string, pipelineType?: string) => {
+    const r = await api.get(`/brains/${brainId}/pipeline`, { params: { pipeline_type: pipelineType } })
+    return r.data
+  },
+  updatePipelineItem: async (brainId: string, itemId: string, data: Record<string, unknown>) => {
+    const r = await api.put(`/brains/${brainId}/pipeline/${itemId}`, data)
+    return r.data
+  },
+
+  // Activity
+  listActivity: async (brainId: string, limit = 100) => {
+    const r = await api.get(`/brains/${brainId}/activity`, { params: { limit } })
+    return r.data
+  },
+
+  // Files
+  uploadFile: async (brainId: string, file: File, questionKey?: string) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    if (questionKey) formData.append('question_key', questionKey)
+    const r = await api.post(`/brains/${brainId}/files`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+    return r.data
+  },
+  listFiles: async (brainId: string) => {
+    const r = await api.get(`/brains/${brainId}/files`)
+    return r.data
+  },
+  deleteFile: async (brainId: string, fileId: string) => {
+    await api.delete(`/brains/${brainId}/files/${fileId}`)
+  },
+
+  // Dashboard
+  dashboardOverview: async () => {
+    const r = await api.get('/brain-dashboard/overview')
+    return r.data
+  },
+  brainStats: async (brainId: string) => {
+    const r = await api.get(`/brain-dashboard/${brainId}/stats`)
+    return r.data
+  },
+}
+
 export default api

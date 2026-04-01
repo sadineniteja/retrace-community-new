@@ -262,6 +262,198 @@ async def store_cookies(
     return AccountResponse(**account.to_dict())
 
 
+# ── Browser Login Flow ────────────────────────────────────────────────
+# Opens a real browser, user logs in via Live View, cookies are captured.
+
+
+class BrowserLoginStartRequest(BaseModel):
+    provider: str = Field(..., pattern="^(linkedin|twitter|github|google|indeed|glassdoor)$")
+
+
+@router.post("/{brain_id}/accounts/browser-login/start")
+async def browser_login_start(
+    brain_id: str,
+    data: BrowserLoginStartRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """
+    Start a browser login session — opens a Playwright browser to the
+    provider's login page. The user logs in via the Brain's Live View tab,
+    then calls /browser-login/capture to save the session cookies.
+    """
+    brain = await brain_manager.get_brain(session, brain_id, current_user.user_id)
+    if not brain:
+        raise HTTPException(status_code=404, detail="Brain not found")
+
+    from app.services.brain_browser_manager import brain_browser_manager
+
+    # Login URLs for providers
+    login_urls = {
+        "linkedin": "https://www.linkedin.com/login",
+        "twitter": "https://twitter.com/i/flow/login",
+        "github": "https://github.com/login",
+        "google": "https://accounts.google.com/signin",
+        "indeed": "https://secure.indeed.com/auth",
+        "glassdoor": "https://www.glassdoor.com/profile/login_input.htm",
+    }
+
+    login_url = login_urls.get(data.provider)
+    if not login_url:
+        raise HTTPException(status_code=400, detail=f"Unsupported provider: {data.provider}")
+
+    # Create a browser session and navigate to login
+    browser_session = await brain_browser_manager.get_or_create(
+        brain_id=brain_id,
+        task_id=f"login_{data.provider}",
+    )
+
+    await browser_session.navigate(login_url)
+    await browser_session.broadcast_status(
+        f"Please log into {data.provider.title()} using the Live View tab. "
+        f"Once logged in, click 'Save Login' to capture your session."
+    )
+
+    return {
+        "status": "browser_opened",
+        "provider": data.provider,
+        "login_url": login_url,
+        "message": f"Browser opened to {data.provider.title()} login. "
+                   f"Go to the Live View tab, log in, then click 'Save Login'.",
+    }
+
+
+@router.post("/{brain_id}/accounts/browser-login/capture")
+async def browser_login_capture(
+    brain_id: str,
+    session: AsyncSession = Depends(get_session),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """
+    Capture cookies from the current browser session and store them
+    as a connected account. Call this after the user has logged in
+    via the Live View.
+    """
+    brain = await brain_manager.get_brain(session, brain_id, current_user.user_id)
+    if not brain:
+        raise HTTPException(status_code=404, detail="Brain not found")
+
+    from app.services.brain_browser_manager import brain_browser_manager
+
+    browser_session = brain_browser_manager.get_session(brain_id)
+    if not browser_session or not browser_session.context:
+        raise HTTPException(status_code=400, detail="No active browser session. Start a login first.")
+
+    # Extract the provider from the task_id
+    provider = "unknown"
+    if browser_session.task_id and browser_session.task_id.startswith("login_"):
+        provider = browser_session.task_id.replace("login_", "")
+
+    # Capture all cookies from the browser context
+    try:
+        cookies = await browser_session.context.cookies()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to capture cookies: {str(e)}")
+
+    if not cookies:
+        raise HTTPException(status_code=400, detail="No cookies found. Make sure you're logged in.")
+
+    # Filter cookies for the provider's domain
+    domain_filters = {
+        "linkedin": [".linkedin.com", "www.linkedin.com", "linkedin.com"],
+        "twitter": [".twitter.com", ".x.com", "twitter.com", "x.com"],
+        "github": [".github.com", "github.com"],
+        "google": [".google.com", "accounts.google.com"],
+        "indeed": [".indeed.com", "secure.indeed.com", "indeed.com"],
+        "glassdoor": [".glassdoor.com", "glassdoor.com"],
+    }
+    allowed_domains = domain_filters.get(provider, [])
+
+    provider_cookies = []
+    for cookie in cookies:
+        domain = cookie.get("domain", "")
+        if any(domain.endswith(d) or d.endswith(domain) for d in allowed_domains):
+            # Convert Playwright cookie format for storage
+            provider_cookies.append({
+                "name": cookie.get("name"),
+                "value": cookie.get("value"),
+                "domain": cookie.get("domain"),
+                "path": cookie.get("path", "/"),
+                "secure": cookie.get("secure", False),
+                "httpOnly": cookie.get("httpOnly", False),
+                "sameSite": cookie.get("sameSite", "Lax"),
+            })
+
+    if not provider_cookies:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No {provider} cookies found. Please make sure you completed the login.",
+        )
+
+    # Get the user agent from the browser context
+    user_agent = None
+    try:
+        if browser_session.page:
+            user_agent = await browser_session.page.evaluate("() => navigator.userAgent")
+    except Exception:
+        pass
+
+    # Detect account identifier (e.g., LinkedIn profile name)
+    account_identifier = None
+    try:
+        if provider == "linkedin" and browser_session.page:
+            # Try to get the user's name from LinkedIn
+            url = browser_session.page.url
+            if "linkedin.com" in url and "/login" not in url:
+                account_identifier = await browser_session.page.evaluate("""() => {
+                    const el = document.querySelector('.feed-identity-module__actor-meta a, .global-nav__me-photo');
+                    return el ? el.getAttribute('alt') || el.textContent?.trim() : null;
+                }""")
+    except Exception:
+        pass
+
+    # Store the cookies as a connected account
+    provider_names = {
+        "linkedin": "LinkedIn",
+        "twitter": "Twitter / X",
+        "github": "GitHub",
+        "google": "Google",
+        "indeed": "Indeed",
+        "glassdoor": "Glassdoor",
+    }
+
+    account = await credential_manager.store_cookies(
+        session,
+        brain_id=brain_id,
+        user_id=current_user.user_id,
+        provider=provider,
+        cookies=provider_cookies,
+        user_agent=user_agent,
+        display_name=provider_names.get(provider, provider.title()),
+        account_identifier=account_identifier,
+    )
+    await session.commit()
+
+    await browser_session.broadcast_status(
+        f"{provider.title()} login saved successfully! You can close the browser now."
+    )
+
+    logger.info(
+        "browser_login_captured",
+        brain_id=brain_id,
+        provider=provider,
+        cookies_count=len(provider_cookies),
+        account_id=account.account_id,
+    )
+
+    return {
+        "status": "captured",
+        "provider": provider,
+        "cookies_count": len(provider_cookies),
+        "account": AccountResponse(**account.to_dict()),
+    }
+
+
 # ── Disconnect ────────────────────────────────────────────────────────
 
 

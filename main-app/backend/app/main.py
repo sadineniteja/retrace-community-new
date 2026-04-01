@@ -31,6 +31,8 @@ from app.api import brain_monitors as brain_monitors_api
 from app.api import pipeline as pipeline_api
 from app.api import brain_activity as brain_activity_api
 from app.api import brain_dashboard as brain_dashboard_api
+from app.api import brain_files as brain_files_api
+from app.api import brain_browser_ws as brain_browser_ws_api
 from app.services.websocket_manager import websocket_manager
 from app.db.database import init_db
 from app.models.automation_run import AutomationRun  # ensure table creation
@@ -275,6 +277,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # Close all browser sessions
     from app.services.browser_manager import browser_manager as _bm
     await _bm.close_all()
+    from app.services.brain_browser_manager import brain_browser_manager as _bbm
+    await _bbm.close_all()
     await websocket_manager.shutdown()
 
 
@@ -415,6 +419,8 @@ app.include_router(brain_monitors_api.router, prefix="/api/v1/brains", tags=["Br
 app.include_router(pipeline_api.router, prefix="/api/v1/brains", tags=["Pipeline"])
 app.include_router(brain_activity_api.router, prefix="/api/v1/brains", tags=["Brain Activity"])
 app.include_router(brain_dashboard_api.router, prefix="/api/v1/brain-dashboard", tags=["Brain Dashboard"])
+app.include_router(brain_files_api.router, prefix="/api/v1/brains", tags=["Brain Files"])
+app.include_router(brain_browser_ws_api.router, tags=["Brain Browser WebSocket"])
 
 # RAG product-assistant router
 from app.rag.api import router as rag_router
