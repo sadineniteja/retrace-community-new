@@ -1,0 +1,11 @@
+{
+  "name": "retrace-llm-edge",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "secret": "wrangler secret put UPSTREAM_ORIGIN"
+  },
+  "devDependencies": {
+    "wrangler": "^4.76.0"
+  }
+}

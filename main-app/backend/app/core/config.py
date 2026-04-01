@@ -1,0 +1,110 @@
+"""
+Application configuration using Pydantic Settings.
+"""
+
+import os
+from pathlib import Path
+from typing import Literal
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Calculate absolute database path to ensure persistence
+_backend_dir = Path(__file__).parent.parent.parent  # app/core/config.py -> app -> main-app/backend
+_db_path = _backend_dir / "retrace.db"
+
+
+class Settings(BaseSettings):
+    """Application settings loaded from environment variables."""
+    
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        extra="ignore",
+    )
+    
+    # Application
+    APP_NAME: str = "ReTrace"
+    APP_VERSION: str = "0.1.0"
+    APP_ENV: Literal["development", "staging", "production"] = "development"
+    DEBUG: bool = True
+    
+    # Database
+    # Use absolute path to ensure database persists across restarts
+    DATABASE_URL: str = f"sqlite+aiosqlite:///{_db_path.absolute()}"
+    
+    # Authentication
+    JWT_SECRET: str = "change-this-in-production-super-secret-key"
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    MAX_FAILED_LOGINS: int = 5
+    LOCKOUT_MINUTES: int = 15
+    
+    # Server
+    HOST: str = "0.0.0.0"
+    PORT: int = 8000
+    WEBSOCKET_PORT: int = 8001
+    
+    # LLM Providers
+    OPENAI_API_KEY: str = ""
+    ANTHROPIC_API_KEY: str = ""
+    
+    # Models
+    REASONING_MODEL: str = "gpt-4o"
+    VISION_MODEL: str = "gpt-4-vision-preview"
+    
+    # Supabase (community cloud auth) — remote-login uses JWKS only; set project URL only.
+    # https://<project>.supabase.co/auth/v1/.well-known/jwks.json
+    SUPABASE_URL: str = "https://ndpkjdwupcvtglrqjfwr.supabase.co"
+    
+    # Gateway (vendor-agnostic LLM proxy)
+    GATEWAY_PROVIDER: str = "direct"  # direct | zuplo | kong | aws
+    GATEWAY_BASE_URL: str = "https://llm.lumenatech.ai"  # managed gateway default
+    GATEWAY_ADMIN_KEY: str = ""       # admin key for creating consumers
+    GATEWAY_EDGE_FALLBACK_HMAC_SECRET: str = ""  # HMAC secret for edge fallback auth
+
+    # Brain Platform
+    BRAIN_MAX_CONCURRENT_TASKS: int = 5
+    BRAIN_DEFAULT_MAX_ITERATIONS: int = 25
+    BRAIN_TASK_TIMEOUT_SECONDS: int = 600  # 10 min per task
+
+    # Browser Pool
+    BROWSER_POOL_MAX_SESSIONS: int = 10
+    BROWSER_POOL_IDLE_TIMEOUT: int = 1800  # 30 min
+
+    # Redis (optional — falls back to in-memory queue when empty)
+    REDIS_URL: str = ""
+
+    # OAuth Providers (for connected accounts)
+    GOOGLE_OAUTH_CLIENT_ID: str = ""
+    GOOGLE_OAUTH_CLIENT_SECRET: str = ""
+    LINKEDIN_OAUTH_CLIENT_ID: str = ""
+    LINKEDIN_OAUTH_CLIENT_SECRET: str = ""
+    TWITTER_OAUTH_CLIENT_ID: str = ""
+    TWITTER_OAUTH_CLIENT_SECRET: str = ""
+    GITHUB_OAUTH_CLIENT_ID: str = ""
+    GITHUB_OAUTH_CLIENT_SECRET: str = ""
+
+    # Notifications — Push
+    PUSH_VAPID_PRIVATE_KEY: str = ""
+    PUSH_VAPID_PUBLIC_KEY: str = ""
+
+    # Notifications — SMS (Twilio)
+    TWILIO_ACCOUNT_SID: str = ""
+    TWILIO_AUTH_TOKEN: str = ""
+    TWILIO_FROM_NUMBER: str = ""
+
+    # Notifications — Email (SendGrid)
+    SENDGRID_API_KEY: str = ""
+    SENDGRID_FROM_EMAIL: str = ""
+
+    # Logging
+    LOG_LEVEL: str = "DEBUG"
+    LOG_FORMAT: Literal["json", "console"] = "json"
+    
+    @property
+    def is_development(self) -> bool:
+        return self.APP_ENV == "development"
+
+
+settings = Settings()

@@ -1,0 +1,15 @@
+# ReTrace LLM edge Worker — deploy: cd infra/cloudflare/retrace-llm-edge && npx wrangler deploy
+name = "retrace-llm-edge"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+
+# ── Required secrets (set once via wrangler CLI, stored encrypted by Cloudflare) ──
+#   npx wrangler secret put UPSTREAM_ORIGIN   # your Zuplo deployment URL (it holds the API key)
+#   npx wrangler secret put GATEWAY_SECRET    # legacy HMAC key (keep for email/enterprise logins)
+
+# ── Public vars (safe to commit) ──────────────────────────────────────────────────
+[vars]
+SUPABASE_JWKS_URL = "https://ndpkjdwupcvtglrqjfwr.supabase.co/auth/v1/.well-known/jwks.json"
+
+# After deploy, attach custom domain in Cloudflare dashboard:
+# Workers & Pages → retrace-llm-edge → Settings → Triggers → Custom Domains → llm.lumenatech.ai
