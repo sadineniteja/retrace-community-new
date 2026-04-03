@@ -43,6 +43,9 @@ class LLMSettingsModel(Base):
     # Agent max tool-use iterations per task (1–50, default 10)
     agent_max_iterations: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=10)
 
+    # Enable thinking/reasoning mode for the main LLM (SGLang chat_template_kwargs)
+    enable_thinking: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, default=False)
+
     # Training debug logging — when True, pipeline logs included/excluded folders and files
     debug_logging: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, default=False)
     # Training Phase 3: max number of files to extract in parallel (1 = sequential)
@@ -67,6 +70,7 @@ class LLMSettingsModel(Base):
             "serper_api_key": self.serper_api_key,
             "agent_tools_config": self.agent_tools_config,
             "agent_max_iterations": self.agent_max_iterations if self.agent_max_iterations is not None else 10,
+            "enable_thinking": bool(self.enable_thinking) if self.enable_thinking is not None else False,
             "debug_logging": bool(self.debug_logging) if self.debug_logging is not None else False,
             "max_parallel_files": self.max_parallel_files if self.max_parallel_files is not None else 1,
         }

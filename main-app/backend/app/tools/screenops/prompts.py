@@ -210,6 +210,16 @@ def get_coordinate_finder_prompt(
     )
 
 
+# Set-of-Marks: ask vision model to pick element by number
+SYSTEM_PROMPT_SOM_PICKER = (
+    "You are given an annotated browser screenshot. "
+    "Each interactive element is highlighted with an orange bounding box "
+    "and labeled with a number. "
+    "Reply with ONLY the integer number of the element that best matches "
+    "the given description. No explanation, no other text, just the number."
+)
+
+
 def get_coordinate_finder_prompt_qwen25vl(
     screen_width: int,
     screen_height: int,

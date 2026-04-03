@@ -63,6 +63,19 @@ class BrowserSession:
             logger.warning("screenshot_failed", error=str(exc))
             return None
 
+    async def get_axtree_nodes(self) -> list:
+        """Extract interactive AX tree nodes with pixel coordinates."""
+        self.last_activity = __import__('datetime').datetime.utcnow()
+        if not self.page:
+            return []
+        try:
+            from app.tools.axtree import extract_interactive_nodes
+            return await extract_interactive_nodes(self.page)
+        except Exception as e:
+            import logging
+            logging.getLogger("browser_manager").warning("get_axtree_nodes failed: %s", e)
+            return []
+
     async def navigate(self, url: str) -> dict:
         """Navigate the page to a URL."""
         if not self.page:

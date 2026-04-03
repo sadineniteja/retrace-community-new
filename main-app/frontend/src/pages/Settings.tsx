@@ -31,6 +31,7 @@ interface LLMSettingsResponse {
   screenops_model?: string | null
   screenops_mouse_timeout?: number
   screenops_image_scale?: number
+  enable_thinking?: boolean
   debug_logging?: boolean
   max_parallel_files?: number
   agent_max_iterations?: number
@@ -55,6 +56,7 @@ export default function Settings() {
   const [screenopsMouseTimeout, setScreenopsMouseTimeout] = useState(30)
   const [screenopsImageScale, setScreenopsImageScale] = useState(100)
   const [agentMaxIterations, setAgentMaxIterations] = useState(50)
+  const [enableThinking, setEnableThinking] = useState(false)
   type ConnectionTestBlock = {
     success?: boolean
     message?: string
@@ -140,6 +142,7 @@ export default function Settings() {
       setScreenopsMouseTimeout(Math.max(5, Math.min(120, currentSettings.screenops_mouse_timeout ?? 30)))
       setScreenopsImageScale(Math.max(25, Math.min(100, currentSettings.screenops_image_scale ?? 100)))
       setAgentMaxIterations(Math.max(1, Math.min(100, currentSettings.agent_max_iterations ?? 50)))
+      setEnableThinking(currentSettings.enable_thinking ?? false)
       setUseCustomLlm(currentSettings.provider === 'custom')
     }
   }, [currentSettings])
@@ -239,6 +242,7 @@ export default function Settings() {
     }
     payload.screenops_mouse_timeout = Math.max(5, Math.min(120, screenopsMouseTimeout))
     payload.screenops_image_scale = Math.max(25, Math.min(100, screenopsImageScale))
+    payload.enable_thinking = enableThinking
     payload.debug_logging = true
     payload.max_parallel_files = 10
     payload.agent_max_iterations = Math.max(1, Math.min(100, agentMaxIterations))
@@ -669,10 +673,10 @@ export default function Settings() {
               </div>
             )}
 
-            {/* Agent — Max iterations */}
+            {/* Agent — Max iterations + Thinking */}
             <div className="border-t border-rt-border pt-4 mt-4">
               <h4 className="text-xs font-semibold text-rt-text-muted uppercase tracking-wide mb-3">Agent</h4>
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 mb-3">
                 <label htmlFor="agent-max-iterations" className="label whitespace-nowrap">Max iterations</label>
                 <select
                   id="agent-max-iterations"
@@ -687,6 +691,23 @@ export default function Settings() {
                 <p className="text-xs text-rt-text-muted">
                   Max tool-use steps per agent task.
                 </p>
+              </div>
+              <div className="flex items-center justify-between bg-rt-surface/30 rounded-lg px-3 py-2.5">
+                <div>
+                  <p className="text-sm font-medium">Enable Thinking</p>
+                  <p className="text-xs text-rt-text-muted mt-0.5">
+                    Turn on reasoning mode for the main LLM. Coordinate finder is unaffected.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={enableThinking}
+                  onClick={() => setEnableThinking(v => !v)}
+                  className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${enableThinking ? 'bg-rt-primary' : 'bg-rt-border'}`}
+                >
+                  <span className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ${enableThinking ? 'translate-x-5' : 'translate-x-0'}`} />
+                </button>
               </div>
             </div>
 

@@ -43,6 +43,8 @@ from langchain_core.tools import StructuredTool
 from app.services.browser_manager import browser_manager, SCREENSHOT_HEIGHT
 from app.tools.analysis import analyze_extraction_options
 from app.tools.token_analyzer import calculate_screenshot_count
+from app.tools.axtree import extract_interactive_nodes, get_overlay_roles, snapshot_hash
+from app.tools.som_annotator import annotate_som
 
 # Directory for saving screenshots sent to vision/coordinate models
 _BROWSER_SCREENSHOTS_DIR = Path(__file__).resolve().parent.parent.parent / "browser_screenshots"
@@ -118,6 +120,25 @@ async def _push_screenshot_to_ws(session: Any) -> None:
         session.websocket_clients -= disconnected
     except Exception:
         pass
+
+
+async def _verify_click_effect(page: Any, pre_url: str, pre_hash: str) -> dict:
+    """Check whether a click had any observable effect on the page.
+
+    Returns dict with 'verified' bool and 'change' description.
+    """
+    import asyncio as _asyncio
+    await _asyncio.sleep(0.6)
+    try:
+        new_url = page.url
+        if new_url != pre_url:
+            return {"verified": True, "change": "url"}
+        new_hash = await snapshot_hash(page)
+        if new_hash and pre_hash and new_hash != pre_hash:
+            return {"verified": True, "change": "dom"}
+    except Exception:
+        pass
+    return {"verified": False, "change": "none"}
 
 
 async def _auto_browser(
@@ -403,10 +424,33 @@ async def _auto_browser(
                     cx, cy = int(coords["x"]), int(coords["y"])
                     cx = max(0, min(cx, SCREENSHOT_WIDTH - 1))
                     cy = max(0, min(cy, SCREENSHOT_HEIGHT - 1))
+                    pre_url = page.url
+                    pre_h = await snapshot_hash(page)
                     await _notify_click_indicator(session, cx, cy)
                     await page.mouse.click(cx, cy)
-                    await asyncio.sleep(0.5)
-                    # Page may have navigated — safely get URL/title
+                    verification = await _verify_click_effect(page, pre_url, pre_h)
+                    retries = 0
+                    # Retry once if click had no effect
+                    if not verification["verified"]:
+                        retries = 1
+                        b64_retry = await session.get_screenshot_base64()
+                        if b64_retry:
+                            coords2, _ = coordinate_finder(
+                                screenshot_base64=b64_retry,
+                                target_description=target,
+                                screen_width=SCREENSHOT_WIDTH,
+                                screen_height=SCREENSHOT_HEIGHT,
+                                image_width=SCREENSHOT_WIDTH,
+                                image_height=SCREENSHOT_HEIGHT,
+                            )
+                            if coords2 and coords2.get("x") is not None:
+                                cx2 = max(0, min(int(coords2["x"]), SCREENSHOT_WIDTH - 1))
+                                cy2 = max(0, min(int(coords2["y"]), SCREENSHOT_HEIGHT - 1))
+                                await _notify_click_indicator(session, cx2, cy2)
+                                await page.mouse.click(cx2, cy2)
+                                verification = await _verify_click_effect(page, pre_url, pre_h)
+                                if verification["verified"]:
+                                    cx, cy = cx2, cy2
                     try:
                         session.current_url = page.url
                         session.current_title = await page.title()
@@ -415,6 +459,8 @@ async def _auto_browser(
                         session.current_title = ""
                     result["clicked"] = {"x": cx, "y": cy}
                     result["target"] = target
+                    result["verified"] = verification["verified"]
+                    result["retries"] = retries
                     result["url"] = session.current_url
                     result["title"] = session.current_title
                 else:
@@ -422,6 +468,74 @@ async def _auto_browser(
                     result["error"] = f"Could not find '{target}' on the page. Try a different description or use click_element(selector)."
             except Exception as exc:
                 return json.dumps({"error": f"click_target failed: {exc}"})
+
+        elif action == "click_som":
+            if not target:
+                return json.dumps({"error": "target is required for click_som"})
+            if not chat_model:
+                return json.dumps({"error": "click_som requires a chat model"})
+
+            b64 = await session.get_screenshot_base64()
+            if not b64:
+                return json.dumps({"error": "Screenshot capture failed"})
+
+            nodes = await session.get_axtree_nodes()
+            if not nodes:
+                return json.dumps({"error": "No interactive elements found on page. Try click_target instead."})
+
+            annotated_b64, visible_nodes = annotate_som(b64, nodes)
+            _save_screenshot(annotated_b64, f"click_som_{target[:40]}")
+
+            if not visible_nodes:
+                return json.dumps({"error": "No visible interactive elements to annotate"})
+
+            from app.tools.screenops.prompts import SYSTEM_PROMPT_SOM_PICKER
+            from langchain_core.messages import HumanMessage, SystemMessage
+
+            try:
+                resp = await chat_model.ainvoke([
+                    SystemMessage(content=SYSTEM_PROMPT_SOM_PICKER),
+                    HumanMessage(content=[
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{annotated_b64}"}},
+                        {"type": "text", "text": f"Which numbered element matches: '{target}'? Reply with only the number."},
+                    ]),
+                ])
+                resp_text = resp.content if hasattr(resp, "content") else str(resp)
+            except Exception as exc:
+                return json.dumps({"error": f"click_som vision call failed: {exc}"})
+
+            import re as _re
+            m = _re.search(r'\b(\d+)\b', resp_text)
+            if not m:
+                return json.dumps({"error": f"click_som: model did not return a number. Response: {resp_text[:100]}"})
+
+            chosen_idx = int(m.group(1))
+            if chosen_idx < 1 or chosen_idx > len(visible_nodes):
+                return json.dumps({"error": f"click_som: model returned out-of-range index {chosen_idx} (max {len(visible_nodes)})"})
+
+            chosen = visible_nodes[chosen_idx - 1]
+            cx, cy = int(chosen.cx), int(chosen.cy)
+
+            pre_url = page.url
+            pre_h = await snapshot_hash(page)
+            await page.mouse.click(cx, cy)
+            await _notify_click_indicator(session, cx, cy)
+
+            verification = await _verify_click_effect(page, pre_url, pre_h)
+
+            try:
+                session.current_url = page.url
+                session.current_title = await page.title()
+            except Exception:
+                session.current_url = page.url or ""
+                session.current_title = ""
+
+            result["clicked"] = {"x": cx, "y": cy}
+            result["target"] = target
+            result["chosen_element"] = {"index": chosen_idx, "role": chosen.role, "name": chosen.name}
+            result["verified"] = verification["verified"]
+            result["url"] = session.current_url
+            result["title"] = session.current_title
 
         # ── Find coordinates by vision (no click) ─────────────────
         elif action == "find_coordinates":
@@ -488,6 +602,28 @@ async def _auto_browser(
                 result["title"] = session.current_title
             except Exception as exc:
                 return json.dumps({"error": f"read_page failed: {exc}"})
+
+        elif action == "read_page_enhanced":
+            try:
+                text = await page.inner_text("body")
+                if len(text) > MAX_TEXT_LENGTH:
+                    text = text[:MAX_TEXT_LENGTH] + "\n... (truncated)"
+            except Exception:
+                text = ""
+            nodes = await session.get_axtree_nodes()
+            overlays = get_overlay_roles(nodes)
+            iframe_count = max(0, len(page.frames) - 1)
+            interactive = [
+                {"index": n.index, "role": n.role, "name": n.name,
+                 "x": int(n.cx), "y": int(n.cy)}
+                for n in nodes if n.is_visible
+            ]
+            result["text"] = text
+            result["interactive_elements"] = interactive
+            result["overlays_detected"] = overlays
+            result["iframes_count"] = iframe_count
+            result["url"] = page.url
+            result["title"] = await page.title()
 
         # ── Scroll ─────────────────────────────────────────────────
         elif action == "scroll":
@@ -598,7 +734,7 @@ async def _auto_browser(
                 return json.dumps({"error": f"analyze_page failed: {exc}"})
 
         else:
-            return json.dumps({"error": f"Unknown action: {action}. Valid actions: navigate, analyze_page, screenshot, screenshot_full_page, click, click_element, click_target, find_coordinates, type, fill, read_page, scroll, press_key, hover, select_option, wait, evaluate_js, back, forward, refresh, get_url"})
+            return json.dumps({"error": f"Unknown action: {action}. Valid actions: navigate, analyze_page, screenshot, screenshot_full_page, click, click_element, click_target, click_som, find_coordinates, type, fill, read_page, read_page_enhanced, scroll, press_key, hover, select_option, wait, evaluate_js, back, forward, refresh, get_url"})
 
         # Force an immediate screenshot push to the workspace so the user
         # sees the result of every tool action in real-time, without waiting
@@ -690,10 +826,12 @@ def build_auto_browser_tool(
             "  click(x, y)              — Click at exact pixel coordinates\n"
             "  click_element(selector)  — Click a CSS-selector element (FAST, preferred when selector is known)\n"
             "  click_target(target)     — Click an element by visual description using AI vision (e.g. target='the blue Sign In button')\n"
+            "  click_som(target)        — Click using Set-of-Marks: annotates page with numbered boxes, vision model picks the number. More reliable than click_target on dense/JS-heavy pages.\n"
             "  find_coordinates(target) — Find x,y coordinates of an element by visual description (no click)\n"
             "  type(text)               — Type text into the focused element\n"
             "  fill(selector, text)     — Fill a form input by CSS selector\n"
             "  read_page(selector?)     — Extract text from the full page or a specific CSS selector\n"
+            "  read_page_enhanced()     — Like read_page but also returns interactive elements list (role, name, position) + overlay detection. Prefer this over read_page for interactive tasks.\n"
             "  scroll(direction, amount) — Scroll up/down by pixel amount\n"
             "  press_key(key)           — Press a key: Enter, Tab, Escape, Backspace, etc.\n"
             "  hover(selector or x,y)   — Hover over an element or coordinates\n"
@@ -706,7 +844,8 @@ def build_auto_browser_tool(
             "  1. click_element(selector) — FASTEST. Use when you know the CSS selector.\n"
             "  2. click_target(target)    — Uses AI vision to find & click. Use when you can describe\n"
             "     the element visually but don't know the selector. e.g. target='the Login button'\n"
-            "  3. click(x, y)            — Use when you already have exact coordinates.\n\n"
+            "  3. click_som(target)      — annotates screenshot, reliable on overlays and JS-heavy UIs\n"
+            "  4. click(x, y)            — Use when you already have exact coordinates.\n\n"
             "SMART CONTENT EXTRACTION WORKFLOW:\n"
             "  1. navigate(url) → land on the page\n"
             "  2. analyze_page  → see token costs for read_page vs screenshot\n"

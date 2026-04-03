@@ -50,6 +50,8 @@ class LLMSettings(BaseModel):
     screenops_image_scale: Optional[int] = Field(None, ge=25, le=100)
     # Web Search — Serper API key for enhanced web search
     serper_api_key: Optional[str] = None
+    # Enable thinking/reasoning for the main LLM
+    enable_thinking: Optional[bool] = None
     # Training: when True, pipeline logs included/excluded folders and files
     debug_logging: Optional[bool] = None
     # Training Phase 3: max files to extract in parallel (1–32, default 1)
@@ -72,6 +74,7 @@ class LLMSettingsResponse(BaseModel):
     screenops_model: Optional[str] = None
     screenops_mouse_timeout: int = 30
     screenops_image_scale: int = 100
+    enable_thinking: bool = False
     debug_logging: bool = False
     max_parallel_files: int = 1
 
@@ -183,6 +186,8 @@ async def update_llm_settings(settings_data: LLMSettings):
                 # Serper API key for web search
                 if settings_data.serper_api_key is not None:
                     db_settings.serper_api_key = settings_data.serper_api_key if settings_data.serper_api_key else None
+                if settings_data.enable_thinking is not None:
+                    db_settings.enable_thinking = bool(settings_data.enable_thinking)
                 if settings_data.debug_logging is not None:
                     db_settings.debug_logging = bool(settings_data.debug_logging)
                 if settings_data.max_parallel_files is not None:
@@ -250,6 +255,7 @@ async def update_llm_settings(settings_data: LLMSettings):
                 screenops_model=getattr(db_settings, "screenops_model", None),
                 screenops_mouse_timeout=int(getattr(db_settings, "screenops_mouse_timeout", 30) or 30),
                 screenops_image_scale=max(25, min(100, int(getattr(db_settings, "screenops_image_scale", 100) or 100))),
+                enable_thinking=bool(getattr(db_settings, "enable_thinking", False)),
                 debug_logging=bool(getattr(db_settings, "debug_logging", False)),
                 max_parallel_files=int(getattr(db_settings, "max_parallel_files", 1) or 1),
             )
@@ -285,6 +291,7 @@ async def get_llm_settings(session: AsyncSession = Depends(get_session)):
         screenops_model=getattr(db_settings, "screenops_model", None),
         screenops_mouse_timeout=int(getattr(db_settings, "screenops_mouse_timeout", 30) or 30),
         screenops_image_scale=max(25, min(100, int(getattr(db_settings, "screenops_image_scale", 100) or 100))),
+        enable_thinking=bool(getattr(db_settings, "enable_thinking", False)),
         debug_logging=bool(getattr(db_settings, "debug_logging", False)),
         max_parallel_files=int(getattr(db_settings, "max_parallel_files", 1) or 1),
     )
@@ -676,6 +683,7 @@ async def get_active_llm_settings(session: AsyncSession, consumer_key: str | Non
             "serper_gateway_bearer": "",
             "serper_gateway_extra_headers": {},
             "agent_tools_config": agent_tools_config,
+            "enable_thinking": bool(getattr(db_settings, "enable_thinking", False)),
             "debug_logging": bool(getattr(db_settings, "debug_logging", True)),
             "max_parallel_files": 10,
         }
@@ -706,6 +714,7 @@ async def get_active_llm_settings(session: AsyncSession, consumer_key: str | Non
             "serper_gateway_bearer": "",
             "serper_gateway_extra_headers": {},
             "agent_tools_config": agent_tools_config,
+            "enable_thinking": bool(getattr(db_settings, "enable_thinking", False)),
             "debug_logging": bool(getattr(db_settings, "debug_logging", True)),
             "max_parallel_files": 10,
         }
@@ -811,6 +820,7 @@ async def get_active_llm_settings(session: AsyncSession, consumer_key: str | Non
         "serper_gateway_bearer": serper_bearer,
         "serper_gateway_extra_headers": serper_extra_headers,
         "agent_tools_config": agent_tools_config,
+        "enable_thinking": bool(getattr(db_settings, "enable_thinking", False)),
         "debug_logging": bool(getattr(db_settings, "debug_logging", True)),
         "max_parallel_files": 10,
     }

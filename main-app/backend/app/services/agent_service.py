@@ -110,6 +110,13 @@ That text becomes the final answer shown to the user.
 - **Web search**: use `web_search("query")` for quick lookups, `web_research("query")` for comprehensive research, `web_advanced(...)` for advanced searches with operators
 - **Multi-step tasks**: use `todo_write(...)` to plan and track progress
 
+- **Browser automation (auto_browser)**:
+  * After `navigate`, use `read_page_enhanced()` — returns page text AND a numbered list of every interactive element (buttons, links, inputs) with their names. Fast (~0.5s), no vision model needed.
+  * For clicking: use `click_som(target="...")` — it overlays numbered boxes on the page screenshot and picks the right element. Handles overlays, ads, iframes, and JS-heavy pages that `read_page` misses.
+  * `click_target(target="...")` also works and auto-retries if the click has no effect.
+  * ONLY use `screenshot(describe_screenshot=True)` when the user explicitly asks "what do you see?" or the page is purely visual (canvas, game, no DOM). For all navigation tasks use `read_page_enhanced()`.
+  * Preferred pattern: `navigate` → `read_page_enhanced()` → `click_som(...)` → `read_page_enhanced()` → `click_som(...)`
+
 - **SSH**: ALWAYS pass the remote command inline: `terminal('ssh user@host "cmd"')`. NEVER open an interactive session (`ssh user@host` alone) — it will timeout.
 
 {tool_descriptions}
@@ -251,10 +258,10 @@ def _build_langchain_model(llm_settings: dict) -> Any:
             kwargs["base_url"] = api_url
             # Custom/local LLM servers may be slow to respond — use generous timeouts
             kwargs["http_async_client"] = _httpx.AsyncClient(timeout=_httpx.Timeout(300.0, connect=30.0))
-            # Disable thinking for local models (e.g. Qwen) — benchmarks show
-            # no-thinking is faster with comparable or better accuracy on V2 tasks.
-            # sglang uses chat_template_kwargs to toggle thinking mode.
-            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+            # sglang uses chat_template_kwargs to toggle thinking/reasoning mode.
+            # Controlled via Settings UI; defaults to off for speed.
+            enable_thinking = bool(llm_settings.get("enable_thinking", False))
+            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": enable_thinking}}
         if llm_settings.get("default_headers"):
             kwargs["default_headers"] = llm_settings["default_headers"]
         return ChatOpenAI(**kwargs)
