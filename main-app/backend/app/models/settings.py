@@ -25,7 +25,11 @@ class LLMSettingsModel(Base):
     model_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     provider: Mapped[str] = mapped_column(String(50), default="openai")
     
-    # ScreenOps — coord finder uses Cloudflare→Zuplo only; no keys/URL/model stored here.
+    # ScreenOps — separate endpoint/key/model for coordinate finder (custom LLM mode)
+    # If not set, falls back to the main api_url / api_key / model_name
+    screenops_api_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    screenops_api_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    screenops_model: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     # Keyboard-only mode: seconds to wait when a mouse click is unavoidable and no coord finder
     screenops_mouse_timeout: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=30)
     # ScreenOps screenshot scale 25–100: percentage of original size sent to vision model (reduces tokens)
@@ -55,6 +59,9 @@ class LLMSettingsModel(Base):
             "api_key": self.api_key,
             "model_name": self.model_name,
             "provider": self.provider,
+            "screenops_api_url": self.screenops_api_url,
+            "screenops_api_key": self.screenops_api_key,
+            "screenops_model": self.screenops_model,
             "screenops_mouse_timeout": self.screenops_mouse_timeout if self.screenops_mouse_timeout is not None else 30,
             "screenops_image_scale": self.screenops_image_scale if self.screenops_image_scale is not None else 100,
             "serper_api_key": self.serper_api_key,

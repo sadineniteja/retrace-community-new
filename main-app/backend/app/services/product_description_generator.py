@@ -72,12 +72,16 @@ async def generate_product_description(
         # Generate description using LLM
         from openai import AsyncOpenAI
         
-        client_kwargs: dict = {"api_key": api_key}
+        import httpx
+        client_kwargs: dict = {
+            "api_key": api_key,
+            "timeout": httpx.Timeout(300.0, connect=30.0),
+        }
         if llm_settings.get("api_url"):
             client_kwargs["base_url"] = llm_settings["api_url"]
         if llm_settings.get("default_headers"):
             client_kwargs["default_headers"] = llm_settings["default_headers"]
-        
+
         client = AsyncOpenAI(**client_kwargs)
         model_name = llm_settings.get("model_name", settings.REASONING_MODEL)
         

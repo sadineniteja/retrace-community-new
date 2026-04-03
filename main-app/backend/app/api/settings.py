@@ -40,6 +40,10 @@ class LLMSettings(BaseModel):
     api_key: Optional[str] = None
     model_name: str = Field(..., min_length=1)
     provider: str = Field(default="openai", pattern="^(openai|anthropic|custom)$")
+    # ScreenOps — separate endpoint/key/model for coordinate finder
+    screenops_api_url: Optional[str] = None
+    screenops_api_key: Optional[str] = None
+    screenops_model: Optional[str] = None
     # ScreenOps keyboard-only: seconds to wait when mouse click unavoidable (5–120)
     screenops_mouse_timeout: Optional[int] = None
     # ScreenOps image scale 25–100: percentage of screenshot size sent to model (reduces tokens)
@@ -63,6 +67,9 @@ class LLMSettingsResponse(BaseModel):
     provider: str
     api_key_set: bool
     serper_api_key_set: bool = False
+    screenops_api_url: Optional[str] = None
+    screenops_api_key_set: bool = False
+    screenops_model: Optional[str] = None
     screenops_mouse_timeout: int = 30
     screenops_image_scale: int = 100
     debug_logging: bool = False
@@ -162,6 +169,13 @@ async def update_llm_settings(settings_data: LLMSettings):
                 if settings_data.api_url is not None:
                     db_settings.api_url = settings_data.api_url if settings_data.api_url else None
                 
+                # ScreenOps separate config
+                if settings_data.screenops_api_url is not None:
+                    db_settings.screenops_api_url = settings_data.screenops_api_url.strip() or None
+                if settings_data.screenops_api_key is not None and settings_data.screenops_api_key.strip():
+                    db_settings.screenops_api_key = settings_data.screenops_api_key.strip()
+                if settings_data.screenops_model is not None:
+                    db_settings.screenops_model = settings_data.screenops_model.strip() or None
                 if settings_data.screenops_mouse_timeout is not None:
                     db_settings.screenops_mouse_timeout = max(5, min(120, int(settings_data.screenops_mouse_timeout)))
                 if settings_data.screenops_image_scale is not None:
@@ -231,6 +245,9 @@ async def update_llm_settings(settings_data: LLMSettings):
                 provider=db_settings.provider or "openai",
                 api_key_set=bool(db_settings.api_key),
                 serper_api_key_set=bool(getattr(db_settings, "serper_api_key", None)),
+                screenops_api_url=getattr(db_settings, "screenops_api_url", None),
+                screenops_api_key_set=bool(getattr(db_settings, "screenops_api_key", None)),
+                screenops_model=getattr(db_settings, "screenops_model", None),
                 screenops_mouse_timeout=int(getattr(db_settings, "screenops_mouse_timeout", 30) or 30),
                 screenops_image_scale=max(25, min(100, int(getattr(db_settings, "screenops_image_scale", 100) or 100))),
                 debug_logging=bool(getattr(db_settings, "debug_logging", False)),
@@ -263,12 +280,15 @@ async def get_llm_settings(session: AsyncSession = Depends(get_session)):
         provider=db_settings.provider or "openai",
         api_key_set=bool(db_settings.api_key),
         serper_api_key_set=bool(getattr(db_settings, "serper_api_key", None)),
+        screenops_api_url=getattr(db_settings, "screenops_api_url", None),
+        screenops_api_key_set=bool(getattr(db_settings, "screenops_api_key", None)),
+        screenops_model=getattr(db_settings, "screenops_model", None),
         screenops_mouse_timeout=int(getattr(db_settings, "screenops_mouse_timeout", 30) or 30),
         screenops_image_scale=max(25, min(100, int(getattr(db_settings, "screenops_image_scale", 100) or 100))),
         debug_logging=bool(getattr(db_settings, "debug_logging", False)),
         max_parallel_files=int(getattr(db_settings, "max_parallel_files", 1) or 1),
     )
-    
+
     print(f"[GET_SETTINGS] Returning: provider={response.provider}, model={response.model_name}, api_url={response.api_url}", flush=True)
     return response
 
@@ -369,7 +389,11 @@ async def test_llm_connection(settings_data: LLMSettings, session: AsyncSession 
         if settings_data.provider not in ("openai", "custom", "anthropic"):
             raise ValueError("Invalid provider specified")
 
-        client = AsyncOpenAI(**client_kwargs)
+        import httpx
+        client = AsyncOpenAI(
+            **client_kwargs,
+            timeout=httpx.Timeout(120.0, connect=30.0),
+        )
         response = await client.chat.completions.create(
             model=effective_model,
             messages=[{"role": "user", "content": "Say OK"}],
@@ -395,27 +419,40 @@ async def test_llm_connection(settings_data: LLMSettings, session: AsyncSession 
             "latency_ms": 0,
         }
     except Exception as e:
+        import traceback
+        print(f"[TEST] Chat error: {type(e).__name__}: {e}", flush=True)
+        traceback.print_exc()
         results["chat"] = {
             "success": False,
-            "message": f"❌ Chat: {str(e)[:100]}",
+            "message": f"❌ Chat: {type(e).__name__}: {str(e)[:100]}",
             "latency_ms": 0,
         }
 
     # ── Test ScreenOps ──
     if _is_custom:
-        # Custom LLM: ScreenOps uses the same endpoint
+        # Custom LLM: use dedicated ScreenOps endpoint if configured in DB, else fall back to main
         try:
             start_time = time.time()
-            client = AsyncOpenAI(api_key=settings_data.api_key, base_url=settings_data.api_url)
+            if db_settings is None:
+                db_settings = await get_or_create_settings(session)
+            so_url = (getattr(db_settings, "screenops_api_url", None) or "").strip() or settings_data.api_url
+            so_key = (getattr(db_settings, "screenops_api_key", None) or "").strip() or settings_data.api_key
+            so_model = (getattr(db_settings, "screenops_model", None) or "").strip() or settings_data.model_name
+            client = AsyncOpenAI(
+                api_key=so_key,
+                base_url=so_url,
+                timeout=httpx.Timeout(120.0, connect=30.0),
+            )
             response = await client.chat.completions.create(
-                model=settings_data.model_name,
+                model=so_model,
                 messages=[{"role": "user", "content": "Say OK"}],
                 max_tokens=5,
             )
             latency_ms = int((time.time() - start_time) * 1000)
+            so_label = f"ScreenOps [{so_url}]" if so_url != settings_data.api_url else "ScreenOps (main LLM)"
             results["screenops"] = {
                 "success": True,
-                "message": f"✅ ScreenOps (custom) connected [{_model_code(response.model)}]",
+                "message": f"✅ {so_label} [{_model_code(so_model)}]",
                 "latency_ms": latency_ms,
             }
         except Exception as e:
@@ -614,6 +651,12 @@ async def get_active_llm_settings(session: AsyncSession, consumer_key: str | Non
     custom_url = (db_settings.api_url or "").strip()
     custom_key = (db_settings.api_key or "").strip()
     if provider == "custom" and custom_url and custom_key:
+        # ScreenOps: use dedicated config if set, otherwise fall back to main LLM config
+        so_api_url = (getattr(db_settings, "screenops_api_url", None) or "").strip() or custom_url
+        so_api_key = (getattr(db_settings, "screenops_api_key", None) or "").strip() or custom_key
+        so_model = (getattr(db_settings, "screenops_model", None) or "").strip() or main_model
+        # If screenops model differs from main model, set main as fallback
+        so_fallback = main_model if so_model != main_model else None
         return {
             "api_key": custom_key,
             "api_url": custom_url,
@@ -621,10 +664,10 @@ async def get_active_llm_settings(session: AsyncSession, consumer_key: str | Non
             "llm_unavailable_detail": None,
             "model_name": main_model,
             "provider": provider,
-            "screenops_api_key": custom_key,
-            "screenops_api_url": custom_url,
-            "screenops_model": main_model,
-            "screenops_coord_fallback_model": None,
+            "screenops_api_key": so_api_key,
+            "screenops_api_url": so_api_url,
+            "screenops_model": so_model,
+            "screenops_coord_fallback_model": so_fallback,
             "screenops_mouse_timeout": max(5, min(120, int(getattr(db_settings, "screenops_mouse_timeout", 30) or 30))),
             "screenops_image_scale": max(25, min(100, int(getattr(db_settings, "screenops_image_scale", 100) or 100))),
             "serper_api_key": getattr(db_settings, "serper_api_key", None),

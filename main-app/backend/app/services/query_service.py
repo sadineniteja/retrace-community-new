@@ -314,7 +314,11 @@ class QueryService:
 
     @staticmethod
     def _build_llm_client(llm: dict) -> AsyncOpenAI:
-        kw: dict = {"api_key": llm["api_key"]}
+        import httpx
+        kw: dict = {
+            "api_key": llm["api_key"],
+            "timeout": httpx.Timeout(300.0, connect=30.0),
+        }
         if llm.get("api_url"):
             kw["base_url"] = llm["api_url"]
         if llm.get("default_headers"):

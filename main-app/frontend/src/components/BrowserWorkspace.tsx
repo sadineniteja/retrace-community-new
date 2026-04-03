@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Globe, ArrowLeft, ArrowRight, RotateCw,
   Loader2, MousePointer, Wifi, WifiOff, Plus, X,
-  Type as TypeIcon, Keyboard,
+  Keyboard,
 } from 'lucide-react'
 
 interface Tab {
@@ -38,14 +38,41 @@ export default function BrowserWorkspace({ conversationId, isVisible }: BrowserW
   const [urlInput, setUrlInput] = useState('')
   const [isConnected, setIsConnected] = useState(false)
   const [statusMessage, setStatusMessage] = useState('')
-  const [showTypeInput, setShowTypeInput] = useState(false)
-  const [typeText, setTypeText] = useState('')
+  const [browserFocused, setBrowserFocused] = useState(false)
+  const [clickIndicator, setClickIndicator] = useState<{ x: number; y: number; id: number } | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const imgRef = useRef<HTMLImageElement>(null)
+  const viewportRef = useRef<HTMLDivElement>(null)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const connectAttemptRef = useRef(0)
+  const clickIndicatorTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const activeTab = tabs.find(t => t.id === activeTabId) || tabs[0]
+
+  const showClickIndicator = useCallback((browserX: number, browserY: number) => {
+    const img = imgRef.current
+    const viewport = viewportRef.current
+    if (!img || !viewport) return
+    const imgRect = img.getBoundingClientRect()
+    const vpRect = viewport.getBoundingClientRect()
+    const natW = img.naturalWidth || 1280
+    const natH = img.naturalHeight || 900
+    const elemAspect = imgRect.width / imgRect.height
+    const imgAspect = natW / natH
+    let renderW: number, renderH: number, offsetX: number, offsetY: number
+    if (imgAspect > elemAspect) {
+      renderW = imgRect.width; renderH = imgRect.width / imgAspect
+      offsetX = 0; offsetY = (imgRect.height - renderH) / 2
+    } else {
+      renderH = imgRect.height; renderW = imgRect.height * imgAspect
+      offsetX = (imgRect.width - renderW) / 2; offsetY = 0
+    }
+    const x = (browserX / natW) * renderW + offsetX + (imgRect.left - vpRect.left)
+    const y = (browserY / natH) * renderH + offsetY + (imgRect.top - vpRect.top)
+    if (clickIndicatorTimer.current) clearTimeout(clickIndicatorTimer.current)
+    setClickIndicator({ x, y, id: Date.now() })
+    clickIndicatorTimer.current = setTimeout(() => setClickIndicator(null), 900)
+  }, [])
 
   // Connect WebSocket
   const connect = useCallback(() => {
@@ -103,6 +130,9 @@ export default function BrowserWorkspace({ conversationId, isVisible }: BrowserW
               setUrlInput(msg.result.url)
             }
             break
+          case 'click_indicator':
+            showClickIndicator(msg.x, msg.y)
+            break
           case 'closed':
             setStatusMessage('Session ended')
             setIsConnected(false)
@@ -126,7 +156,7 @@ export default function BrowserWorkspace({ conversationId, isVisible }: BrowserW
     ws.onerror = () => {
       setStatusMessage('Connection error — retrying...')
     }
-  }, [effectiveSessionId, isVisible])
+  }, [effectiveSessionId, isVisible, showClickIndicator])
 
   // Connect on mount / visibility change
   useEffect(() => {
@@ -176,13 +206,40 @@ export default function BrowserWorkspace({ conversationId, isVisible }: BrowserW
   const handleImageClick = useCallback((e: React.MouseEvent<HTMLImageElement>) => {
     const img = imgRef.current
     if (!img) return
+
+    // Account for objectFit: contain — the image may be letterboxed
     const rect = img.getBoundingClientRect()
-    const scaleX = img.naturalWidth / rect.width
-    const scaleY = img.naturalHeight / rect.height
-    const x = Math.round((e.clientX - rect.left) * scaleX)
-    const y = Math.round((e.clientY - rect.top) * scaleY)
+    const natW = img.naturalWidth
+    const natH = img.naturalHeight
+    if (!natW || !natH) return
+
+    const elemAspect = rect.width / rect.height
+    const imgAspect = natW / natH
+    let renderW: number, renderH: number, offsetX: number, offsetY: number
+
+    if (imgAspect > elemAspect) {
+      renderW = rect.width
+      renderH = rect.width / imgAspect
+      offsetX = 0
+      offsetY = (rect.height - renderH) / 2
+    } else {
+      renderH = rect.height
+      renderW = rect.height * imgAspect
+      offsetX = (rect.width - renderW) / 2
+      offsetY = 0
+    }
+
+    const relX = e.clientX - rect.left - offsetX
+    const relY = e.clientY - rect.top - offsetY
+    if (relX < 0 || relY < 0 || relX > renderW || relY > renderH) return
+
+    const x = Math.round((relX / renderW) * natW)
+    const y = Math.round((relY / renderH) * natH)
+
     send({ type: 'click', x, y })
+    showClickIndicator(x, y)
     setStatusMessage(`Clicked (${x}, ${y})`)
+    viewportRef.current?.focus()
   }, [send])
 
   const handleNavigate = useCallback((e: React.FormEvent) => {
@@ -210,16 +267,29 @@ export default function BrowserWorkspace({ conversationId, isVisible }: BrowserW
     send({ type: 'scroll', direction, amount: Math.min(Math.abs(e.deltaY), 500) })
   }, [send])
 
-  const handleType = useCallback((e: React.FormEvent) => {
+  // Capture real keyboard events and forward them to the browser
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if ((e.target as HTMLElement).tagName === 'INPUT') return
     e.preventDefault()
-    if (!typeText) return
-    send({ type: 'type', text: typeText })
-    setTypeText('')
-    setShowTypeInput(false)
-  }, [typeText, send])
+    e.stopPropagation()
 
-  const handleKeyPress = useCallback((key: string) => {
-    send({ type: 'key', key })
+    const keyMap: Record<string, string> = {
+      'Enter': 'Enter', 'Tab': 'Tab', 'Escape': 'Escape',
+      'Backspace': 'Backspace', 'Delete': 'Delete',
+      'ArrowUp': 'ArrowUp', 'ArrowDown': 'ArrowDown',
+      'ArrowLeft': 'ArrowLeft', 'ArrowRight': 'ArrowRight',
+      'Home': 'Home', 'End': 'End', 'PageUp': 'PageUp',
+      'PageDown': 'PageDown', ' ': 'Space',
+    }
+
+    if (keyMap[e.key]) {
+      send({ type: 'key', key: keyMap[e.key] })
+    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+      send({ type: 'type', text: e.key })
+    } else if (e.ctrlKey || e.metaKey) {
+      const combo = `${e.metaKey ? 'Meta+' : 'Control+'}${e.key}`
+      send({ type: 'key', key: combo })
+    }
   }, [send])
 
   // Tab management
@@ -336,21 +406,35 @@ export default function BrowserWorkspace({ conversationId, isVisible }: BrowserW
             </div>
           </form>
 
-          {/* Keyboard input helpers */}
+          {/* Quick key buttons */}
           <button
-            onClick={() => setShowTypeInput(!showTypeInput)}
-            className={`p-1.5 rounded-full transition-colors ${showTypeInput ? 'bg-rt-primary-container/20 text-rt-primary' : 'hover:bg-rt-bg-lighter text-rt-text-muted hover:text-rt-text'}`}
-            title="Type text into page"
-          >
-            <TypeIcon className="w-3 h-3" />
-          </button>
-          <button
-            onClick={() => handleKeyPress('Enter')}
-            className="p-1.5 rounded-full hover:bg-rt-bg-lighter text-rt-text-muted hover:text-rt-text transition-colors"
+            onClick={() => send({ type: 'key', key: 'Enter' })}
+            className="p-1.5 rounded-full hover:bg-rt-bg-lighter text-rt-text-muted hover:text-rt-text transition-colors text-[9px] font-bold"
             title="Press Enter"
           >
-            <Keyboard className="w-3 h-3" />
+            ↵
           </button>
+          <button
+            onClick={() => send({ type: 'key', key: 'Tab' })}
+            className="p-1.5 rounded-full hover:bg-rt-bg-lighter text-rt-text-muted hover:text-rt-text transition-colors text-[9px] font-bold"
+            title="Press Tab"
+          >
+            ⇥
+          </button>
+          <button
+            onClick={() => send({ type: 'key', key: 'Backspace' })}
+            className="p-1.5 rounded-full hover:bg-rt-bg-lighter text-rt-text-muted hover:text-rt-text transition-colors text-[9px] font-bold"
+            title="Backspace"
+          >
+            ⌫
+          </button>
+
+          {/* Keyboard focus indicator */}
+          {browserFocused && (
+            <span className="flex items-center gap-1 text-[10px] font-medium text-rt-primary bg-rt-primary/10 px-2 py-0.5 rounded-full">
+              <Keyboard className="w-3 h-3" /> Typing
+            </span>
+          )}
 
           {/* Connection status */}
           <div className="flex items-center gap-1.5 text-[10px] text-rt-text-muted flex-shrink-0 font-bold uppercase tracking-wider">
@@ -365,40 +449,15 @@ export default function BrowserWorkspace({ conversationId, isVisible }: BrowserW
           </div>
         </div>
 
-        {/* Type text input bar (togglable) */}
-        {showTypeInput && (
-          <form onSubmit={handleType} className="flex items-center gap-2 px-3 py-2 bg-rt-bg-lighter/50 border-b border-[#d8c3ad]/25">
-            <TypeIcon className="w-3.5 h-3.5 text-rt-primary flex-shrink-0" />
-            <input
-              type="text"
-              value={typeText}
-              onChange={(e) => setTypeText(e.target.value)}
-              placeholder="Type text to send to focused element..."
-              className="flex-1 bg-transparent text-xs focus:outline-none placeholder:text-rt-text-muted/50 font-body"
-              autoFocus
-            />
-            <button type="submit" className="text-[10px] font-bold text-rt-primary uppercase px-2 py-1 rounded-full hover:bg-rt-primary-container/15 transition-colors">
-              Send
-            </button>
-            <button
-              type="button"
-              onClick={() => handleKeyPress('Tab')}
-              className="text-[10px] font-bold text-rt-text-muted uppercase px-2 py-1 rounded-full hover:bg-rt-bg-lighter transition-colors"
-            >
-              Tab
-            </button>
-            <button
-              type="button"
-              onClick={() => handleKeyPress('Escape')}
-              className="text-[10px] font-bold text-rt-text-muted uppercase px-2 py-1 rounded-full hover:bg-rt-bg-lighter transition-colors"
-            >
-              Esc
-            </button>
-          </form>
-        )}
-
-        {/* Browser viewport */}
-        <div className="flex-1 overflow-hidden bg-white relative">
+        {/* Browser viewport — focusable for keyboard capture */}
+        <div
+          ref={viewportRef}
+          tabIndex={0}
+          onKeyDown={handleKeyDown}
+          onFocus={() => setBrowserFocused(true)}
+          onBlur={() => setBrowserFocused(false)}
+          className={`flex-1 overflow-hidden bg-white relative outline-none ${browserFocused ? 'ring-2 ring-rt-primary/40 ring-inset' : ''}`}
+        >
           {activeTab?.screenshot ? (
             <img
               ref={imgRef}
@@ -428,6 +487,27 @@ export default function BrowserWorkspace({ conversationId, isVisible }: BrowserW
                   Starting Chromium...
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Click indicator — shows where the agent (or user) clicked */}
+          {clickIndicator && (
+            <div
+              key={clickIndicator.id}
+              className="pointer-events-none absolute z-20"
+              style={{ left: clickIndicator.x, top: clickIndicator.y, transform: 'translate(-50%, -50%)' }}
+            >
+              {/* Ripple ring */}
+              <span className="absolute inset-0 rounded-full bg-orange-400 opacity-60 animate-ping" style={{ width: 28, height: 28, margin: -6 }} />
+              {/* Solid dot */}
+              <span className="relative block w-4 h-4 rounded-full bg-orange-500 border-2 border-white shadow-lg" />
+            </div>
+          )}
+
+          {/* Click-to-focus hint */}
+          {activeTab?.screenshot && !browserFocused && (
+            <div className="absolute top-3 right-3 flex items-center gap-1.5 bg-black/50 backdrop-blur-sm rounded-full px-3 py-1.5 text-[10px] text-white/80 pointer-events-none z-10">
+              <Keyboard className="w-3 h-3" /> Click browser to enable keyboard
             </div>
           )}
 

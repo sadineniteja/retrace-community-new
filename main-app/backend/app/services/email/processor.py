@@ -306,7 +306,11 @@ class EmailProcessingPipeline:
             base_url = llm_settings.get("api_url") or None
             model = llm_settings.get("model_name", "gpt-4o")
 
-            kw: dict = {"api_key": api_key}
+            import httpx
+            kw: dict = {
+                "api_key": api_key,
+                "timeout": httpx.Timeout(300.0, connect=30.0),
+            }
             if base_url:
                 kw["base_url"] = base_url
             if llm_settings.get("default_headers"):

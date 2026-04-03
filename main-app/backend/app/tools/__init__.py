@@ -223,6 +223,7 @@ def get_screenops_tool(
 
 def get_auto_browser_tool(
     chat_model: Any = None,
+    coordinate_finder: Any = None,
     conversation_id: Optional[str] = None,
     output_callback: Optional[Callable[[str], None]] = None,
 ) -> Optional[StructuredTool]:
@@ -231,6 +232,7 @@ def get_auto_browser_tool(
         from app.tools.auto_browser import build_auto_browser_tool
         return build_auto_browser_tool(
             chat_model=chat_model,
+            coordinate_finder=coordinate_finder,
             conversation_id=conversation_id,
             output_callback=output_callback,
         )
@@ -319,9 +321,25 @@ def get_all_tools(
         if so:
             tools.append(so)
 
+        # Build coordinate finder for auto_browser (reuse ScreenOps config)
+        coord_finder = None
+        if screenops_api_key:
+            try:
+                from app.tools.screenops.tool import _make_coordinate_finder_invoker
+                coord_finder = _make_coordinate_finder_invoker(
+                    api_url=screenops_api_url or "https://api.openai.com/v1",
+                    model=screenops_model or "gpt-4o-mini",
+                    api_key=screenops_api_key,
+                    fallback_model=screenops_coord_fallback_model,
+                    extra_headers=screenops_coord_extra_headers,
+                )
+            except ImportError:
+                pass
+
         # AutoBrowser — granular browser control
         ab = get_auto_browser_tool(
             chat_model=chat_model,
+            coordinate_finder=coord_finder,
             conversation_id=conversation_id,
             output_callback=output_callback,
         )

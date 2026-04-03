@@ -11,6 +11,7 @@ Pipeline:
   4. Stream execution via agent.astream() → SSE events
 """
 
+import ast
 import io
 import inspect
 import json
@@ -239,12 +240,21 @@ def _build_langchain_model(llm_settings: dict) -> Any:
     else:
         # openai or custom — both use OpenAI-compatible API
         from langchain_openai import ChatOpenAI
+        import httpx as _httpx
         kwargs: dict[str, Any] = {
             "api_key": api_key,
             "model": model_name,
+            "timeout": 300,
+            "http_client": None,
         }
         if api_url:
             kwargs["base_url"] = api_url
+            # Custom/local LLM servers may be slow to respond — use generous timeouts
+            kwargs["http_async_client"] = _httpx.AsyncClient(timeout=_httpx.Timeout(300.0, connect=30.0))
+            # Disable thinking for local models (e.g. Qwen) — benchmarks show
+            # no-thinking is faster with comparable or better accuracy on V2 tasks.
+            # sglang uses chat_template_kwargs to toggle thinking mode.
+            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
         if llm_settings.get("default_headers"):
             kwargs["default_headers"] = llm_settings["default_headers"]
         return ChatOpenAI(**kwargs)
@@ -431,8 +441,24 @@ def _build_codeact_graph(
     # ── sandbox node ─────────────────────────────────────────────────
     def sandbox(state: AgentState):
         code = state.get("script", "")
+        logger.info("sandbox_exec", code_preview=code[:500] if code else "(empty)")
         existing_context = state.get("context", {})
         exec_globals = {**existing_context, **tools_context}
+
+        # Auto-capture: if the last statement is an expression (function call,
+        # variable, etc.) that doesn't already use print(), wrap it so the
+        # return value isn't silently discarded by exec().
+        try:
+            tree = ast.parse(code)
+            if tree.body and isinstance(tree.body[-1], ast.Expr):
+                # Last statement is a bare expression — wrap it to print result
+                last_line = ast.get_source_segment(code, tree.body[-1])
+                if last_line and "print(" not in last_line:
+                    # Replace last expression with: _result_ = <expr>; print(_result_) if _result_ is not None
+                    lines = code.rsplit(last_line, 1)
+                    code = lines[0] + f"_result_ = {last_line}\nif _result_ is not None:\n    print(_result_)"
+        except SyntaxError:
+            pass  # Let the actual exec() handle syntax errors
 
         # Capture stdout
         buf = io.StringIO()
@@ -766,7 +792,11 @@ class AgentService:
             chat_model = _build_langchain_model(llm_settings)
 
             # Also build an AsyncOpenAI client for web_research (needs async)
-            client_kwargs: dict[str, Any] = {"api_key": llm_settings["api_key"]}
+            import httpx as _httpx
+            client_kwargs: dict[str, Any] = {
+                "api_key": llm_settings["api_key"],
+                "timeout": _httpx.Timeout(300.0, connect=30.0),
+            }
             if llm_settings.get("api_url"):
                 client_kwargs["base_url"] = llm_settings["api_url"]
             if llm_settings.get("default_headers"):

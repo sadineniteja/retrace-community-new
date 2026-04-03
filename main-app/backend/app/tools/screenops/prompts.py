@@ -97,6 +97,14 @@ or if not visible:
 {{"x": null, "y": null}}
 """
 
+# Qwen2.5-VL recommended format — produces (x,y) or (x1,y1,x2,y2) bounding box output.
+# Tested: returned (655, 86, 683, 98) → center (669, 92) for target at actual (641, 91).
+SYSTEM_PROMPT_COORDINATE_FINDER_QWEN25VL = (
+    "You are a screen interaction assistant. "
+    "The screen resolution is {screen_width}x{screen_height} pixels. "
+    "When asked to click, return only the pixel coordinate as (x,y). No explanation."
+)
+
 # Padding to reach minimum prompt length for caching (e.g. ~1024 tokens)
 _CACHE_PAD = "For prompt cache eligibility (min 1024 tokens). "
 COORDINATE_FINDER_CACHE_PADDING = "\n\n" + (_CACHE_PAD * 70)
@@ -199,4 +207,20 @@ def get_coordinate_finder_prompt(
         )
     return SYSTEM_PROMPT_COORDINATE_FINDER.format(
         target_description=target_description,
+    )
+
+
+def get_coordinate_finder_prompt_qwen25vl(
+    screen_width: int,
+    screen_height: int,
+) -> str:
+    """Return the Qwen2.5-VL recommended system prompt for coordinate finding.
+
+    The user text should be: "Click on the {target_description}."
+    Model returns (x,y) or a bounding box (x1,y1,x2,y2); the caller must
+    parse both formats and compute the center for bounding boxes.
+    """
+    return SYSTEM_PROMPT_COORDINATE_FINDER_QWEN25VL.format(
+        screen_width=screen_width,
+        screen_height=screen_height,
     )

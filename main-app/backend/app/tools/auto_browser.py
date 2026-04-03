@@ -33,6 +33,8 @@ import asyncio
 import base64
 import json
 import traceback
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
 
 import structlog
@@ -41,6 +43,22 @@ from langchain_core.tools import StructuredTool
 from app.services.browser_manager import browser_manager, SCREENSHOT_HEIGHT
 from app.tools.analysis import analyze_extraction_options
 from app.tools.token_analyzer import calculate_screenshot_count
+
+# Directory for saving screenshots sent to vision/coordinate models
+_BROWSER_SCREENSHOTS_DIR = Path(__file__).resolve().parent.parent.parent / "browser_screenshots"
+
+
+def _save_screenshot(b64: str, label: str) -> Optional[str]:
+    """Save a base64 screenshot to disk for debugging. Returns the file path or None."""
+    try:
+        _BROWSER_SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
+        safe_label = label.replace(" ", "_").replace("/", "_")[:50]
+        path = _BROWSER_SCREENSHOTS_DIR / f"{ts}_{safe_label}.jpg"
+        path.write_bytes(base64.b64decode(b64))
+        return str(path)
+    except Exception:
+        return None
 
 logger = structlog.get_logger()
 
@@ -52,6 +70,19 @@ async def _notify_ws_clients(session: Any, message: str) -> None:
     """Send a status message to all WebSocket clients watching this session."""
     import json as _json
     payload = _json.dumps({"type": "status", "message": message, "url": session.current_url})
+    disconnected = set()
+    for ws in session.websocket_clients:
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            disconnected.add(ws)
+    session.websocket_clients -= disconnected
+
+
+async def _notify_click_indicator(session: Any, x: int, y: int) -> None:
+    """Broadcast click coordinates so the frontend can show a visual cursor indicator."""
+    import json as _json
+    payload = _json.dumps({"type": "click_indicator", "x": x, "y": y})
     disconnected = set()
     for ws in session.websocket_clients:
         try:
@@ -102,7 +133,9 @@ async def _auto_browser(
     js_expression: str = "",
     seconds: float = 1.0,
     describe_screenshot: bool = False,
+    target: str = "",
     chat_model: Any = None,
+    coordinate_finder: Optional[Any] = None,
     conversation_id: Optional[str] = None,
     output_callback: Optional[Any] = None,
 ) -> str:
@@ -132,6 +165,10 @@ async def _auto_browser(
     if not conversation_id:
         return json.dumps({"error": "No conversation_id — cannot create browser session"})
 
+    import time as _time
+    _t0 = _time.monotonic()
+    logger.info("auto_browser_start", action=action, url=url[:200] if url else "", describe_screenshot=describe_screenshot)
+
     try:
         session = await browser_manager.get_or_create(conversation_id)
         page = session.page
@@ -155,34 +192,37 @@ async def _auto_browser(
             result["url"] = nav.get("url", url)
             result["title"] = nav.get("title", "")
 
-            # Auto-describe the page after navigation so the LLM has
-            # visual context and can decide on next actions.
-            if chat_model:
+            # Auto-describe only when explicitly requested via describe_screenshot.
+            # Skipping by default keeps navigate fast (~1s vs ~10-40s with vision).
+            if describe_screenshot and chat_model:
                 await asyncio.sleep(1)  # wait for page to render
                 b64 = await session.get_screenshot_base64()
                 if b64:
+                    _save_screenshot(b64, f"navigate_describe_{url[:40]}")
                     try:
                         from langchain_core.messages import HumanMessage
                         resp = await chat_model.ainvoke([HumanMessage(content=[
                             {"type": "text", "text": (
-                                "Describe this browser screenshot concisely. "
-                                "List the main page elements, navigation, headings, "
-                                "key content, and any interactive elements (buttons, links, forms). "
-                                "Be specific about text you can read."
+                                "Briefly describe this page. "
+                                "List: purpose, main text, key UI elements. "
+                                "Be concise — max 150 words."
                             )},
                             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                        ])])
+                        ])], max_tokens=300)
                         result["page_description"] = resp.content if hasattr(resp, "content") else str(resp)
                     except Exception as exc:
                         result["page_description"] = f"(vision failed: {exc})"
                 else:
                     result["page_description"] = "(screenshot not available)"
+            else:
+                result["hint"] = "Page loaded. Use read_page() to extract text or screenshot(describe_screenshot=True) for visual analysis."
 
         # ── Screenshot (+ optional LLM description) ────────────────
         elif action == "screenshot":
             b64 = await session.get_screenshot_base64()
             if not b64:
                 return json.dumps({"error": "Screenshot capture failed"})
+            _save_screenshot(b64, "screenshot_describe" if describe_screenshot else "screenshot")
             result["screenshot_length"] = len(b64)
             result["url"] = session.current_url
             result["title"] = session.current_title
@@ -191,15 +231,18 @@ async def _auto_browser(
                 try:
                     from langchain_core.messages import HumanMessage
                     prompt_text = (
-                        "Describe this browser screenshot in detail. "
-                        "List the main UI elements, text content, buttons, "
-                        "links, forms, and any notable features. "
-                        "If there are error messages, quote them exactly."
+                        "Briefly describe this browser screenshot. "
+                        "List: page title/purpose, main visible text, key UI elements "
+                        "(buttons, links, forms, inputs), and any errors. "
+                        "Be concise — max 200 words."
                     )
-                    resp = await chat_model.ainvoke([HumanMessage(content=[
-                        {"type": "text", "text": prompt_text},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                    ])])
+                    resp = await chat_model.ainvoke(
+                        [HumanMessage(content=[
+                            {"type": "text", "text": prompt_text},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                        ])],
+                        max_tokens=400,
+                    )
                     result["description"] = resp.content if hasattr(resp, "content") else str(resp)
                 except Exception as exc:
                     result["description"] = f"Vision analysis failed: {exc}"
@@ -243,6 +286,7 @@ async def _auto_browser(
                     b64 = await session.get_screenshot_base64()
                     if b64:
                         tiles_b64.append(b64)
+                        _save_screenshot(b64, f"fullpage_tile_{i+1}")
 
                 # Scroll back to top
                 await page.evaluate("window.scrollTo(0, 0)")
@@ -255,29 +299,24 @@ async def _auto_browser(
 
                 content_parts: list[dict] = [
                     {"type": "text", "text": (
-                        f"I captured {len(tiles_b64)} screenshot tiles covering this full web page "
-                        f"(each tile is a {SCREENSHOT_HEIGHT}px-tall viewport section, scrolling top to bottom).\n\n"
-                        "For each tile, describe the content you see.\n"
-                        "Then provide a SUMMARY section at the end with:\n"
-                        "1. Overall page structure and purpose\n"
-                        "2. Key content sections you identified\n"
-                        "3. For each section of interest, suggest a CSS selector that could be used with "
-                        "read_page(selector='...') to extract just that section's text. "
-                        "Use selectors like '#id', '.class', 'nav', 'article', 'main', 'table', "
-                        "'ul.links', 'div.content', 'section:nth-of-type(N)', etc.\n"
-                        "4. If you found the specific content the user is looking for, state which "
-                        "selector to use for targeted extraction."
+                        f"{len(tiles_b64)} tiles of this page (top to bottom). "
+                        "Briefly describe each tile, then give a SUMMARY with: "
+                        "1) page purpose, 2) key sections with CSS selectors for "
+                        "read_page(selector='...'). Be concise — max 300 words."
                     )},
                 ]
                 for idx, tile_b64 in enumerate(tiles_b64):
                     content_parts.append(
-                        {"type": "text", "text": f"\n--- Tile {idx + 1} of {len(tiles_b64)} (scroll position ~{idx * SCREENSHOT_HEIGHT}px) ---"}
+                        {"type": "text", "text": f"--- Tile {idx + 1}/{len(tiles_b64)} ---"}
                     )
                     content_parts.append(
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{tile_b64}"}}
                     )
 
-                resp = await chat_model.ainvoke([HumanMessage(content=content_parts)])
+                resp = await chat_model.ainvoke(
+                    [HumanMessage(content=content_parts)],
+                    max_tokens=600,
+                )
                 description = resp.content if hasattr(resp, "content") else str(resp)
 
                 result["num_tiles"] = len(tiles_b64)
@@ -293,12 +332,27 @@ async def _auto_browser(
             except Exception as exc:
                 return json.dumps({"error": f"screenshot_full_page failed: {exc}"})
 
-        # ── Click at coordinates (DISABLED — use click_element instead) ──
+        # ── Click at coordinates ───────────────────────────────────
         elif action == "click":
-            return json.dumps({
-                "error": "click(x, y) is disabled. Use click_element(selector) instead — "
-                "it is more reliable. Example: auto_browser(action='click_element', selector='a.headline')"
-            })
+            if x and y:
+                await _notify_click_indicator(session, x, y)
+                await page.mouse.click(x, y)
+                await asyncio.sleep(0.5)
+                try:
+                    session.current_url = page.url
+                    session.current_title = await page.title()
+                except Exception:
+                    session.current_url = page.url or ""
+                    session.current_title = ""
+                result["clicked"] = {"x": x, "y": y}
+                result["url"] = session.current_url
+                result["title"] = session.current_title
+            else:
+                return json.dumps({
+                    "error": "click requires x,y coordinates. "
+                    "Use click_target(target='description') for vision-based clicking, "
+                    "or click_element(selector) for CSS selector clicking."
+                })
 
         # ── Click element by CSS selector ──────────────────────────
         elif action == "click_element":
@@ -308,12 +362,97 @@ async def _auto_browser(
                 elem = page.locator(selector).first
                 await elem.click(timeout=5000)
                 await asyncio.sleep(0.5)
-                session.current_url = page.url
-                session.current_title = await page.title()
+                try:
+                    session.current_url = page.url
+                    session.current_title = await page.title()
+                except Exception:
+                    session.current_url = page.url or ""
+                    session.current_title = ""
                 result["url"] = session.current_url
                 result["title"] = session.current_title
             except Exception as exc:
                 return json.dumps({"error": f"click_element failed: {exc}"})
+
+        # ── Click target by vision (ScreenOps coordinate finder) ──
+        elif action == "click_target":
+            if not target:
+                return json.dumps({"error": "target is required for click_target. Describe the element to click, e.g. target='the blue Sign In button'"})
+            if not coordinate_finder:
+                return json.dumps({"error": "click_target requires a coordinate finder model. Configure ScreenOps API in Settings, or use click_element(selector) instead."})
+
+            b64 = await session.get_screenshot_base64()
+            if not b64:
+                return json.dumps({"error": "Screenshot capture failed for coordinate finding"})
+            _save_screenshot(b64, f"click_target_{target[:40]}")
+
+            if output_callback:
+                output_callback(f"Finding coordinates for: {target}...")
+            await _notify_ws_clients(session, f"Finding: {target}...")
+
+            try:
+                from app.services.browser_manager import SCREENSHOT_WIDTH, SCREENSHOT_HEIGHT
+                coords, coord_usage = coordinate_finder(
+                    screenshot_base64=b64,
+                    target_description=target,
+                    screen_width=SCREENSHOT_WIDTH,
+                    screen_height=SCREENSHOT_HEIGHT,
+                    image_width=SCREENSHOT_WIDTH,
+                    image_height=SCREENSHOT_HEIGHT,
+                )
+                if coords and coords.get("x") is not None and coords.get("y") is not None:
+                    cx, cy = int(coords["x"]), int(coords["y"])
+                    cx = max(0, min(cx, SCREENSHOT_WIDTH - 1))
+                    cy = max(0, min(cy, SCREENSHOT_HEIGHT - 1))
+                    await _notify_click_indicator(session, cx, cy)
+                    await page.mouse.click(cx, cy)
+                    await asyncio.sleep(0.5)
+                    # Page may have navigated — safely get URL/title
+                    try:
+                        session.current_url = page.url
+                        session.current_title = await page.title()
+                    except Exception:
+                        session.current_url = page.url or ""
+                        session.current_title = ""
+                    result["clicked"] = {"x": cx, "y": cy}
+                    result["target"] = target
+                    result["url"] = session.current_url
+                    result["title"] = session.current_title
+                else:
+                    result["ok"] = False
+                    result["error"] = f"Could not find '{target}' on the page. Try a different description or use click_element(selector)."
+            except Exception as exc:
+                return json.dumps({"error": f"click_target failed: {exc}"})
+
+        # ── Find coordinates by vision (no click) ─────────────────
+        elif action == "find_coordinates":
+            if not target:
+                return json.dumps({"error": "target is required for find_coordinates. Describe the element, e.g. target='the search input field'"})
+            if not coordinate_finder:
+                return json.dumps({"error": "find_coordinates requires a coordinate finder model. Configure ScreenOps API in Settings."})
+
+            b64 = await session.get_screenshot_base64()
+            if not b64:
+                return json.dumps({"error": "Screenshot capture failed"})
+            _save_screenshot(b64, f"find_coords_{target[:40]}")
+
+            try:
+                from app.services.browser_manager import SCREENSHOT_WIDTH, SCREENSHOT_HEIGHT
+                coords, coord_usage = coordinate_finder(
+                    screenshot_base64=b64,
+                    target_description=target,
+                    screen_width=SCREENSHOT_WIDTH,
+                    screen_height=SCREENSHOT_HEIGHT,
+                    image_width=SCREENSHOT_WIDTH,
+                    image_height=SCREENSHOT_HEIGHT,
+                )
+                if coords and coords.get("x") is not None and coords.get("y") is not None:
+                    result["coordinates"] = {"x": int(coords["x"]), "y": int(coords["y"])}
+                    result["target"] = target
+                else:
+                    result["ok"] = False
+                    result["error"] = f"Could not find '{target}' on the page."
+            except Exception as exc:
+                return json.dumps({"error": f"find_coordinates failed: {exc}"})
 
         # ── Type text into focused element ─────────────────────────
         elif action == "type":
@@ -459,26 +598,36 @@ async def _auto_browser(
                 return json.dumps({"error": f"analyze_page failed: {exc}"})
 
         else:
-            return json.dumps({"error": f"Unknown action: {action}. Valid actions: navigate, analyze_page, screenshot, screenshot_full_page, click_element, type, fill, read_page, scroll, press_key, hover, select_option, wait, evaluate_js, back, forward, refresh, get_url"})
+            return json.dumps({"error": f"Unknown action: {action}. Valid actions: navigate, analyze_page, screenshot, screenshot_full_page, click, click_element, click_target, find_coordinates, type, fill, read_page, scroll, press_key, hover, select_option, wait, evaluate_js, back, forward, refresh, get_url"})
 
         # Force an immediate screenshot push to the workspace so the user
         # sees the result of every tool action in real-time, without waiting
         # for the next screenshot loop tick (up to 0.33s delay).
         await _push_screenshot_to_ws(session)
 
+        _elapsed = _time.monotonic() - _t0
+        logger.info("auto_browser_done", action=action, elapsed_s=round(_elapsed, 2))
         return json.dumps(result)
 
     except Exception as exc:
-        logger.error("auto_browser_error", action=action, error=str(exc), tb=traceback.format_exc())
+        _elapsed = _time.monotonic() - _t0
+        logger.error("auto_browser_error", action=action, elapsed_s=round(_elapsed, 2), error=str(exc), tb=traceback.format_exc())
         return json.dumps({"error": str(exc)})
 
 
 def build_auto_browser_tool(
     chat_model: Any = None,
+    coordinate_finder: Optional[Any] = None,
     conversation_id: Optional[str] = None,
     output_callback: Optional[Any] = None,
 ) -> Optional[StructuredTool]:
     """Build the AutoBrowser StructuredTool.
+
+    Args:
+        chat_model: LangChain ChatModel for vision description calls.
+        coordinate_finder: ScreenOps coordinate finder invoker (screenshot → x,y coords).
+        conversation_id: Conversation ID for browser session.
+        output_callback: Callback for real-time output.
 
     Returns None if Playwright is not installed.
     """
@@ -501,8 +650,9 @@ def build_auto_browser_tool(
         js_expression: str = "",
         seconds: float = 1.0,
         describe_screenshot: bool = False,
+        target: str = "",
     ) -> str:
-        return await _auto_browser(
+        result = await _auto_browser(
             action=action,
             url=url,
             selector=selector,
@@ -515,10 +665,16 @@ def build_auto_browser_tool(
             js_expression=js_expression,
             seconds=seconds,
             describe_screenshot=describe_screenshot,
+            target=target,
             chat_model=chat_model,
+            coordinate_finder=coordinate_finder,
             conversation_id=conversation_id,
             output_callback=output_callback,
         )
+        # In CodeAct mode, exec() only captures stdout — not return values.
+        # Print the result so it appears in the captured output.
+        print(result)
+        return result
 
     return StructuredTool.from_function(
         coroutine=_tool_fn,
@@ -526,12 +682,15 @@ def build_auto_browser_tool(
         description=(
             "Control a real Chromium browser visible in the user's Workspace panel. "
             "Every action you take is streamed live so the user sees it happen.\n\n"
-            "ACTIONS:\n"
+            "ACTIONS (prefer screenshot over screenshot_full_page — it's much faster):\n"
             "  navigate(url)            — Go to a URL\n"
             "  analyze_page             — Compare token costs: read_page vs screenshot vs multi-tile\n"
-            "  screenshot(describe_screenshot=True) — Capture viewport + AI-describe\n"
-            "  screenshot_full_page     — Capture ALL page tiles, bundle them into ONE LLM vision call\n"
-            "  click_element(selector)  — Click a CSS-selector element\n"
+            "  screenshot(describe_screenshot=True) — Capture viewport + AI-describe (FAST: ~10s)\n"
+            "  screenshot_full_page     — Capture ALL page tiles in ONE vision call (SLOW: 30-60s, use only when you need to see the ENTIRE page)\n"
+            "  click(x, y)              — Click at exact pixel coordinates\n"
+            "  click_element(selector)  — Click a CSS-selector element (FAST, preferred when selector is known)\n"
+            "  click_target(target)     — Click an element by visual description using AI vision (e.g. target='the blue Sign In button')\n"
+            "  find_coordinates(target) — Find x,y coordinates of an element by visual description (no click)\n"
             "  type(text)               — Type text into the focused element\n"
             "  fill(selector, text)     — Fill a form input by CSS selector\n"
             "  read_page(selector?)     — Extract text from the full page or a specific CSS selector\n"
@@ -543,6 +702,11 @@ def build_auto_browser_tool(
             "  evaluate_js(js_expression) — Run JavaScript in the page\n"
             "  back / forward / refresh — Browser navigation\n"
             "  get_url                  — Get current URL and page title\n\n"
+            "CLICKING STRATEGY (choose the best approach):\n"
+            "  1. click_element(selector) — FASTEST. Use when you know the CSS selector.\n"
+            "  2. click_target(target)    — Uses AI vision to find & click. Use when you can describe\n"
+            "     the element visually but don't know the selector. e.g. target='the Login button'\n"
+            "  3. click(x, y)            — Use when you already have exact coordinates.\n\n"
             "SMART CONTENT EXTRACTION WORKFLOW:\n"
             "  1. navigate(url) → land on the page\n"
             "  2. analyze_page  → see token costs for read_page vs screenshot\n"
@@ -550,12 +714,6 @@ def build_auto_browser_tool(
             "     PATH A (read_page cheaper): read_page() → get all text directly\n"
             "     PATH B (screenshot cheaper): screenshot_full_page → see entire page visually,\n"
             "       identify the section you need, then read_page(selector='#that-section') → \n"
-            "       extract ONLY the targeted text/links from that section\n\n"
-            "EXAMPLE (Path B — hybrid screenshot→targeted read):\n"
-            "  auto_browser(action='navigate', url='https://en.wikipedia.org/wiki/Python')\n"
-            "  auto_browser(action='analyze_page')  # → read_page=28K tokens, screenshot=500\n"
-            "  auto_browser(action='screenshot_full_page')  # → see all tiles, find References\n"
-            "  auto_browser(action='read_page', selector='.references')  # → just the links\n\n"
-            "For clicking, ALWAYS use click_element with a CSS selector, never click with x,y."
+            "       extract ONLY the targeted text/links from that section\n"
         ),
     )

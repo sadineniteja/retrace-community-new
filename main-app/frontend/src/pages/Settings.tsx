@@ -26,6 +26,9 @@ interface LLMSettingsResponse {
   provider: string
   api_key_set: boolean
   serper_api_key_set?: boolean
+  screenops_api_url?: string | null
+  screenops_api_key_set?: boolean
+  screenops_model?: string | null
   screenops_mouse_timeout?: number
   screenops_image_scale?: number
   debug_logging?: boolean
@@ -46,6 +49,9 @@ export default function Settings() {
   const [apiKey, setApiKey] = useState('')
   const [modelName, setModelName] = useState('gpt-4o')
   const [useCustomLlm, setUseCustomLlm] = useState(false)
+  const [screenopsApiUrl, setScreenopsApiUrl] = useState('')
+  const [screenopsApiKey, setScreenopsApiKey] = useState('')
+  const [screenopsModel, setScreenopsModel] = useState('')
   const [screenopsMouseTimeout, setScreenopsMouseTimeout] = useState(30)
   const [screenopsImageScale, setScreenopsImageScale] = useState(100)
   const [agentMaxIterations, setAgentMaxIterations] = useState(50)
@@ -129,6 +135,8 @@ export default function Settings() {
     if (currentSettings) {
       setApiUrl(currentSettings.api_url || '')
       setModelName(currentSettings.model_name || 'gpt-4o')
+      setScreenopsApiUrl(currentSettings.screenops_api_url || '')
+      setScreenopsModel(currentSettings.screenops_model || '')
       setScreenopsMouseTimeout(Math.max(5, Math.min(120, currentSettings.screenops_mouse_timeout ?? 30)))
       setScreenopsImageScale(Math.max(25, Math.min(100, currentSettings.screenops_image_scale ?? 100)))
       setAgentMaxIterations(Math.max(1, Math.min(100, currentSettings.agent_max_iterations ?? 50)))
@@ -155,6 +163,7 @@ export default function Settings() {
       console.log('Save successful, refetching settings')
       // Clear password fields
       setApiKey('')
+      setScreenopsApiKey('')
       
       // Invalidate and wait for refetch to complete
       await queryClient.invalidateQueries({ queryKey: ['settings', 'llm'] })
@@ -222,6 +231,11 @@ export default function Settings() {
       payload.api_url = apiUrl.trim()
     } else {
       payload.api_url = null
+    }
+    if (useCustomLlm) {
+      payload.screenops_api_url = screenopsApiUrl.trim() || null
+      if (screenopsApiKey.trim()) payload.screenops_api_key = screenopsApiKey.trim()
+      payload.screenops_model = screenopsModel.trim() || null
     }
     payload.screenops_mouse_timeout = Math.max(5, Math.min(120, screenopsMouseTimeout))
     payload.screenops_image_scale = Math.max(25, Math.min(100, screenopsImageScale))
@@ -599,6 +613,58 @@ export default function Settings() {
                       API key is configured (enter new key to update)
                     </p>
                   )}
+                </div>
+
+                {/* ScreenOps separate config */}
+                <div className="border-t border-rt-border/50 pt-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Monitor className="w-4 h-4 text-rt-primary" />
+                    <p className="text-sm font-medium">ScreenOps Coordinate Finder</p>
+                  </div>
+                  <p className="text-xs text-rt-text-muted mb-3">
+                    Optional: use a separate model/endpoint for coordinate finding (e.g. Qwen2.5-VL-7B, OS-Atlas). Leave blank to use the main LLM above.
+                  </p>
+                  <div className="space-y-3">
+                    <div>
+                      <label className="label">ScreenOps API URL</label>
+                      <input
+                        type="text"
+                        className="input"
+                        placeholder="http://10.0.0.x:1234/v1 (leave blank to use main URL)"
+                        value={screenopsApiUrl}
+                        onChange={(e) => setScreenopsApiUrl(e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label className="label">ScreenOps Model</label>
+                      <input
+                        type="text"
+                        className="input"
+                        placeholder="Qwen2.5-VL-7B-Instruct (leave blank to use main model)"
+                        value={screenopsModel}
+                        onChange={(e) => setScreenopsModel(e.target.value)}
+                      />
+                      <p className="text-xs text-rt-text-muted mt-1">
+                        Best options: Qwen2.5-VL-7B, OS-Atlas-7B, UI-TARS-7B, ShowUI-2B
+                      </p>
+                    </div>
+                    <div>
+                      <label className="label">ScreenOps API Key</label>
+                      <input
+                        type="password"
+                        className="input font-mono"
+                        placeholder="sk-... (leave blank to use main API key)"
+                        value={screenopsApiKey}
+                        onChange={(e) => setScreenopsApiKey(e.target.value)}
+                      />
+                      {currentSettings?.screenops_api_key_set && !screenopsApiKey && (
+                        <p className="text-xs text-rt-success mt-1 flex items-center gap-1">
+                          <CheckCircle className="w-3 h-3" />
+                          ScreenOps key configured (enter new key to update)
+                        </p>
+                      )}
+                    </div>
+                  </div>
                 </div>
               </div>
             )}

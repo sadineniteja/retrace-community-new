@@ -7,7 +7,7 @@ import {
   Activity, ListChecks, Eye, Link2, BarChart3, Send,
   CheckCircle2, XCircle, Clock, AlertTriangle, Star,
   Monitor, Wifi, WifiOff, RotateCw,
-  Globe, MousePointer,
+  Globe, MousePointer, Keyboard,
 } from 'lucide-react'
 import { brainApi } from '@/utils/api'
 import type { BrainTask, BrainActivity as BrainActivityType, PipelineItem, ConnectedAccount, BrainMonitor, BrainStats } from '@/types/brain'
@@ -414,8 +414,10 @@ function BrainLiveView({ brainId }: { brainId: string }) {
   const [urlInput, setUrlInput] = useState('')
   // Human intervention alert state
   const [alert, setAlert] = useState<{ type: string; message: string } | null>(null)
+  const [browserFocused, setBrowserFocused] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
   const imgRef = useRef<HTMLImageElement>(null)
+  const viewportRef = useRef<HTMLDivElement>(null)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const connect = useCallback(() => {
@@ -515,12 +517,48 @@ function BrainLiveView({ brainId }: { brainId: string }) {
   const handleImageClick = useCallback((e: React.MouseEvent<HTMLImageElement>) => {
     const img = imgRef.current
     if (!img) return
+
+    // Account for objectFit: contain — the image may be letterboxed
     const rect = img.getBoundingClientRect()
-    const scaleX = img.naturalWidth / rect.width
-    const scaleY = img.naturalHeight / rect.height
-    const x = Math.round((e.clientX - rect.left) * scaleX)
-    const y = Math.round((e.clientY - rect.top) * scaleY)
+    const natW = img.naturalWidth
+    const natH = img.naturalHeight
+    if (!natW || !natH) return
+
+    // Calculate the actual rendered image size within the element
+    const elemAspect = rect.width / rect.height
+    const imgAspect = natW / natH
+    let renderW: number, renderH: number, offsetX: number, offsetY: number
+
+    if (imgAspect > elemAspect) {
+      // Image is wider — pillarboxed (bars top/bottom)
+      renderW = rect.width
+      renderH = rect.width / imgAspect
+      offsetX = 0
+      offsetY = (rect.height - renderH) / 2
+    } else {
+      // Image is taller — letterboxed (bars left/right)
+      renderH = rect.height
+      renderW = rect.height * imgAspect
+      offsetX = (rect.width - renderW) / 2
+      offsetY = 0
+    }
+
+    // Mouse position relative to the actual rendered image
+    const relX = e.clientX - rect.left - offsetX
+    const relY = e.clientY - rect.top - offsetY
+
+    // Ignore clicks outside the actual image area
+    if (relX < 0 || relY < 0 || relX > renderW || relY > renderH) return
+
+    // Map to original image coordinates
+    const x = Math.round((relX / renderW) * natW)
+    const y = Math.round((relY / renderH) * natH)
+
     send({ type: 'click', x, y })
+    setStatusMessage(`Clicked (${x}, ${y})`)
+
+    // Focus the viewport so keyboard works
+    viewportRef.current?.focus()
   }, [send])
 
   const handleNavigate = useCallback((e: React.FormEvent) => {
@@ -550,6 +588,44 @@ function BrainLiveView({ brainId }: { brainId: string }) {
     setStatusMessage('Resuming...')
   }, [send])
 
+  // Capture real keyboard events and forward them to the browser
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    // Don't capture if user is typing in the URL bar
+    if ((e.target as HTMLElement).tagName === 'INPUT') return
+
+    e.preventDefault()
+    e.stopPropagation()
+
+    // Map special keys
+    const keyMap: Record<string, string> = {
+      'Enter': 'Enter',
+      'Tab': 'Tab',
+      'Escape': 'Escape',
+      'Backspace': 'Backspace',
+      'Delete': 'Delete',
+      'ArrowUp': 'ArrowUp',
+      'ArrowDown': 'ArrowDown',
+      'ArrowLeft': 'ArrowLeft',
+      'ArrowRight': 'ArrowRight',
+      'Home': 'Home',
+      'End': 'End',
+      'PageUp': 'PageUp',
+      'PageDown': 'PageDown',
+      ' ': 'Space',
+    }
+
+    if (keyMap[e.key]) {
+      send({ type: 'key', key: keyMap[e.key] })
+    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+      // Regular character — type it
+      send({ type: 'type', text: e.key })
+    } else if (e.ctrlKey || e.metaKey) {
+      // Ctrl/Cmd shortcuts
+      const combo = `${e.metaKey ? 'Meta+' : 'Control+'}${e.key}`
+      send({ type: 'key', key: combo })
+    }
+  }, [send])
+
   return (
     <div className="rounded-2xl border border-rt-border bg-rt-surface overflow-hidden">
       {/* Browser toolbar */}
@@ -570,11 +646,48 @@ function BrainLiveView({ brainId }: { brainId: string }) {
               type="text"
               value={urlInput}
               onChange={(e) => setUrlInput(e.target.value)}
-              placeholder="Brain is browsing..."
+              placeholder="Enter URL or search..."
               className="flex-1 bg-transparent text-xs focus:outline-none placeholder:text-rt-text-muted/50"
             />
           </div>
         </form>
+
+        {/* Quick key buttons */}
+        <button
+          onClick={() => send({ type: 'key', key: 'Enter' })}
+          className="p-1.5 rounded-lg hover:bg-rt-bg-lighter text-rt-text-muted text-[9px] font-bold"
+          title="Press Enter"
+        >
+          ↵
+        </button>
+        <button
+          onClick={() => send({ type: 'key', key: 'Tab' })}
+          className="p-1.5 rounded-lg hover:bg-rt-bg-lighter text-rt-text-muted text-[9px] font-bold"
+          title="Press Tab"
+        >
+          ⇥
+        </button>
+        <button
+          onClick={() => send({ type: 'key', key: 'Backspace' })}
+          className="p-1.5 rounded-lg hover:bg-rt-bg-lighter text-rt-text-muted text-[9px] font-bold"
+          title="Backspace"
+        >
+          ⌫
+        </button>
+        <button
+          onClick={() => send({ type: 'key', key: 'Escape' })}
+          className="p-1.5 rounded-lg hover:bg-rt-bg-lighter text-rt-text-muted text-[9px] font-bold"
+          title="Escape"
+        >
+          Esc
+        </button>
+
+        {/* Keyboard focus indicator */}
+        {browserFocused && (
+          <span className="flex items-center gap-1 text-[10px] font-medium text-rt-primary bg-rt-primary/10 px-2 py-0.5 rounded-full">
+            <Keyboard className="w-3 h-3" /> Keyboard Active
+          </span>
+        )}
 
         {/* Status */}
         <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider">
@@ -654,8 +767,16 @@ function BrainLiveView({ brainId }: { brainId: string }) {
         </div>
       )}
 
-      {/* Browser viewport — constrained height with scroll */}
-      <div className="relative bg-white overflow-hidden" style={{ maxHeight: '520px' }}>
+      {/* Browser viewport — focusable for keyboard capture */}
+      <div
+        ref={viewportRef}
+        tabIndex={0}
+        onKeyDown={handleKeyDown}
+        onFocus={() => setBrowserFocused(true)}
+        onBlur={() => setBrowserFocused(false)}
+        className={`relative bg-white overflow-hidden outline-none ${browserFocused ? 'ring-2 ring-rt-primary/40 ring-inset' : ''}`}
+        style={{ maxHeight: '520px' }}
+      >
         {screenshot ? (
           <img
             ref={imgRef}
@@ -693,6 +814,13 @@ function BrainLiveView({ brainId }: { brainId: string }) {
             {statusMessage.includes('...') && <Loader2 className="w-3 h-3 animate-spin flex-shrink-0" />}
             {statusMessage.includes('Click') && <MousePointer className="w-3 h-3 flex-shrink-0" />}
             <span className="truncate">{statusMessage}</span>
+          </div>
+        )}
+
+        {/* Click-to-focus hint */}
+        {screenshot && !browserFocused && (
+          <div className="absolute top-3 right-3 flex items-center gap-1.5 bg-black/50 backdrop-blur-sm rounded-full px-3 py-1.5 text-[10px] text-white/80 pointer-events-none">
+            <Keyboard className="w-3 h-3" /> Click browser to enable keyboard
           </div>
         )}
       </div>

@@ -22,6 +22,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from app.tools.screenops.workflow import run_screen_workflow
 from app.tools.screenops.prompts import (
     get_coordinate_finder_prompt,
+    get_coordinate_finder_prompt_qwen25vl,
     COORDINATE_FINDER_CACHE_PADDING,
     VISION_CACHE_PADDING,
 )
@@ -381,6 +382,28 @@ def _make_coordinate_finder_invoker(
         models_try.append(fb)
     endpoint = f"{base_url}/chat/completions"
 
+    # Detect UI-TARS by querying the actual running model from /v1/models.
+    # Settings may have a stale model name; the server always knows what's loaded.
+    # UI-TARS outputs 0–1000 normalized coordinates regardless of image size.
+    _uitars_models: set[str] = {m for m in [primary, fb] if "ui-tars" in m.lower()}
+    try:
+        import urllib.request as _ur
+        _mreq = _ur.Request(
+            f"{base_url}/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            method="GET",
+        )
+        with _ur.urlopen(_mreq, timeout=5) as _r:
+            _mdata = json.loads(_r.read())
+        for _entry in (_mdata.get("data") or []):
+            _mid = str(_entry.get("id", ""))
+            if "ui-tars" in _mid.lower():
+                _uitars_models.add(primary)  # primary is what we send in the payload
+                logger.info("coord_finder: detected UI-TARS running at %s (%s)", base_url, _mid)
+                break
+    except Exception as _e:
+        logger.debug("coord_finder: could not query /v1/models: %s", _e)
+
     def invoker(screenshot_base64, target_description, screen_width, screen_height, image_width, image_height, **kwargs):
         import httpx
 
@@ -393,15 +416,13 @@ def _make_coordinate_finder_invoker(
                    resized_image=f"{resized_w}x{resized_h}",
                    screen=f"{screen_width}x{screen_height}")
 
-        prompt = get_coordinate_finder_prompt(
-            target_description=target_description,
+        # Use Qwen2.5-VL recommended format: concise system prompt + "Click on X."
+        # This format outperforms verbose JSON-instruction prompts on GUI grounding benchmarks.
+        system_text = get_coordinate_finder_prompt_qwen25vl(
             screen_width=resized_w,
             screen_height=resized_h,
-            image_width=resized_w,
-            image_height=resized_h,
-            match_agent_prompt=True,
         )
-        system_text = prompt + COORDINATE_FINDER_CACHE_PADDING
+        user_text = f"Click on the {target_description}."
 
         for attempt_idx, coord_model in enumerate(models_try):
             payload = {
@@ -415,11 +436,15 @@ def _make_coordinate_finder_invoker(
                                 "type": "image_url",
                                 "image_url": {"url": f"data:image/png;base64,{resized_b64}"},
                             },
-                            {"type": "text", "text": f"Find: {target_description}"},
+                            {"type": "text", "text": user_text},
                         ],
                     },
                 ],
-                "max_tokens": 150,
+                "max_tokens": 50,
+                "temperature": 0.1,
+                # Disable thinking for local models (sglang/Qwen) — coordinate
+                # finder needs clean output, not reasoning chains.
+                "chat_template_kwargs": {"enable_thinking": False},
             }
 
             try:
@@ -438,11 +463,8 @@ def _make_coordinate_finder_invoker(
                 data = r.json()
             except Exception as e:
                 logger.warning(
-                    "coord_finder_request_failed",
-                    endpoint=endpoint,
-                    model=coord_model,
-                    attempt=attempt_idx + 1,
-                    error=str(e),
+                    "coord_finder_request_failed endpoint=%s model=%s attempt=%d error=%s",
+                    endpoint, coord_model, attempt_idx + 1, str(e),
                 )
                 continue
 
@@ -466,16 +488,53 @@ def _make_coordinate_finder_invoker(
                 clean_text = re.sub(r"^```(?:json)?\s*", "", clean_text)
                 clean_text = re.sub(r"\s*```\s*$", "", clean_text)
                 clean_text = clean_text.strip()
-            json_match = re.search(r'\{[^}]+\}', clean_text)
-            if json_match:
-                try:
-                    coords = json.loads(json_match.group(0))
-                except json.JSONDecodeError:
-                    pass
+
+            # --- Bounding box: (x1, y1, x2, y2) — Qwen2.5-VL often returns this.
+            #     Use x1 (left edge) for X — models tend to overshoot right on bbox center,
+            #     so x1 is consistently closer to the actual element position.
+            #     Use center for Y since vertical alignment is accurate.
+            if not coords:
+                m = re.search(r'\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)', clean_text)
+                if m:
+                    x1, y1, x2, y2 = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+                    coords = {"x": x1, "y": (y1 + y2) // 2}
+
+            # --- Tuple (x, y)
+            if not coords:
+                m = re.search(r'\(\s*(\d+)\s*,\s*(\d+)\s*\)', clean_text)
+                if m:
+                    coords = {"x": int(m.group(1)), "y": int(m.group(2))}
+
+            # --- JSON {"x": N, "y": N}
+            if not coords:
+                json_match = re.search(r'\{[^}]+\}', clean_text)
+                if json_match:
+                    try:
+                        coords = json.loads(json_match.group(0))
+                    except json.JSONDecodeError:
+                        pass
             if not coords:
                 m = re.search(r'\{\s*["\']x["\']\s*:\s*(\d+)\s*,\s*["\']y["\']\s*:\s*(\d+)\s*\}', text)
                 if m:
                     coords = {"x": int(m.group(1)), "y": int(m.group(2))}
+            if not coords:
+                # Malformed: {"x": 607, 143} — model sometimes drops "y": key
+                m = re.search(r'\{\s*["\']x["\']\s*:\s*(\d+)\s*,\s*(\d+)\s*\}', text)
+                if m:
+                    coords = {"x": int(m.group(1)), "y": int(m.group(2))}
+
+            if not coords:
+                # Last resort: extract all integers and detect 4-number bbox or 2-number point
+                nums = re.findall(r'\b(\d{2,4})\b', text)
+                if len(nums) >= 4:
+                    x1, y1, x2, y2 = int(nums[0]), int(nums[1]), int(nums[2]), int(nums[3])
+                    cx, cy = x1, (y1 + y2) // 2  # x1 for X (more accurate), center for Y
+                    if 0 < cx <= screen_width and 0 < cy <= screen_height:
+                        coords = {"x": cx, "y": cy}
+                elif len(nums) >= 2:
+                    x_val, y_val = int(nums[0]), int(nums[1])
+                    if 0 < x_val <= screen_width and 0 < y_val <= screen_height:
+                        coords = {"x": x_val, "y": y_val}
 
             _debug_log("coord_finder",
                        target=target_description,
@@ -487,7 +546,15 @@ def _make_coordinate_finder_invoker(
 
             if coords.get("x") is not None and coords.get("y") is not None:
                 cx, cy = float(coords["x"]), float(coords["y"])
-                if 0.0 < cx <= 1.0 and 0.0 < cy <= 1.0:
+                if coord_model in _uitars_models or (cx > resized_w or cy > resized_h):
+                    # UI-TARS always outputs 0–1000 normalized scale.
+                    # Also catches other models that exceed image bounds.
+                    px = int(round(cx / 1000.0 * screen_width))
+                    py = int(round(cy / 1000.0 * screen_height))
+                    _debug_log("coord_finder", target=target_description, norm1000_to_screen=(cx, cy, px, py))
+                    coords = {"x": px, "y": py}
+                elif 0.0 < cx <= 1.0 and 0.0 < cy <= 1.0:
+                    # 0.0–1.0 normalized (e.g. older prompt formats)
                     px = int(round(cx * screen_width))
                     py = int(round(cy * screen_height))
                     _debug_log("coord_finder", target=target_description, normalized_to_screen=(cx, cy, px, py))
@@ -508,10 +575,8 @@ def _make_coordinate_finder_invoker(
                 return coords, usage
 
             logger.warning(
-                "coord_finder_no_coordinates",
-                model=coord_model,
-                attempt=attempt_idx + 1,
-                target=(target_description or "")[:80],
+                "coord_finder_no_coordinates model=%s attempt=%d target=%s",
+                coord_model, attempt_idx + 1, (target_description or "")[:80],
             )
 
         return {}, {}
