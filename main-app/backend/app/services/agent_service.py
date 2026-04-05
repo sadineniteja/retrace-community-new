@@ -107,15 +107,20 @@ That text becomes the final answer shown to the user.
 - **Editing files (targeted changes)**: use `str_replace(file, old, new)` — NOT rewriting the whole file
 - **Deleting files**: use `delete_file("path")` — NOT `terminal("rm ...")`
 - **Reading web pages**: use `web_fetch("url")` — returns clean text
-- **Web search**: use `web_search("query")` for quick lookups, `web_research("query")` for comprehensive research, `web_advanced(...)` for advanced searches with operators
+- **Web search**: use `web_search("query")` for quick lookups, `web_research("query")` for comprehensive research, `web_advanced(...)` for advanced searches with operators. **If web_search returns irrelevant or no results, do NOT give up — escalate:** try `web_fetch("likely_url")` to hit the source directly, or use `navigate()` + `read_page_enhanced()` to browse the target site and extract the data yourself.
 - **Multi-step tasks**: use `todo_write(...)` to plan and track progress
 
 - **Browser automation (auto_browser)**:
-  * After `navigate`, use `read_page_enhanced()` — returns page text AND a numbered list of every interactive element (buttons, links, inputs) with their names. Fast (~0.5s), no vision model needed.
-  * For clicking: use `click_som(target="...")` — it overlays numbered boxes on the page screenshot and picks the right element. Handles overlays, ads, iframes, and JS-heavy pages that `read_page` misses.
-  * `click_target(target="...")` also works and auto-retries if the click has no effect.
-  * ONLY use `screenshot(describe_screenshot=True)` when the user explicitly asks "what do you see?" or the page is purely visual (canvas, game, no DOM). For all navigation tasks use `read_page_enhanced()`.
-  * Preferred pattern: `navigate` → `read_page_enhanced()` → `click_som(...)` → `read_page_enhanced()` → `click_som(...)`
+  * Preferred flow: `navigate` → `read_page_enhanced()` → `click_som(target="...")` → repeat.
+  * `read_page_enhanced()` — returns page text AND a numbered list of every interactive element with names. Fast (~0.5s), no vision model needed. Use this after every navigate and after every click to observe the new state.
+  * **Click hierarchy — try in this order:**
+    1. `click_som(target="...")` — best default. Uses AXTree + visual overlay to find and click buttons, links, inputs. Handles overlays, ads, iframes, JS-heavy pages.
+    2. `click_target(target="...")` — use when the element is purely visual (icon, image, non-DOM button) and not found by `click_som`. Uses the ScreenOps coordinate finder model.
+    3. `click(x=N, y=N)` — last resort only. Use for canvas interactions, CAPTCHA, drag-and-drop, or when both above fail.
+  * **Screenshots:**
+    - `screenshot()` (no args) — cheap visual state check, no vision model used. Use to verify what the page looks like before deciding next action.
+    - `screenshot(describe_screenshot=True)` — sends screenshot to vision model for description. Use ONLY when page is purely visual (canvas, game, image) or user explicitly asks "what do you see?". Never use for normal navigation — `read_page_enhanced()` is 10x faster.
+  * Never use `describe_screenshot=True` for routine navigation tasks.
 
 - **SSH**: ALWAYS pass the remote command inline: `terminal('ssh user@host "cmd"')`. NEVER open an interactive session (`ssh user@host` alone) — it will timeout.
 
@@ -228,8 +233,12 @@ def _is_gemini_model(llm_settings: dict) -> bool:
 # LangChain model builder
 # ---------------------------------------------------------------------------
 
-def _build_langchain_model(llm_settings: dict) -> Any:
-    """Create a LangChain ChatModel from ReTrace LLM settings."""
+def _build_langchain_model(llm_settings: dict, enable_thinking_override: Optional[bool] = None) -> Any:
+    """Create a LangChain ChatModel from ReTrace LLM settings.
+
+    enable_thinking_override: when provided, takes precedence over the stored
+    enable_thinking setting (used by the per-request reasoning toggle).
+    """
     provider = llm_settings.get("provider", "openai")
     api_key = llm_settings.get("api_key", "")
     model_name = llm_settings.get("model_name", app_settings.REASONING_MODEL)
@@ -259,8 +268,11 @@ def _build_langchain_model(llm_settings: dict) -> Any:
             # Custom/local LLM servers may be slow to respond — use generous timeouts
             kwargs["http_async_client"] = _httpx.AsyncClient(timeout=_httpx.Timeout(300.0, connect=30.0))
             # sglang uses chat_template_kwargs to toggle thinking/reasoning mode.
-            # Controlled via Settings UI; defaults to off for speed.
-            enable_thinking = bool(llm_settings.get("enable_thinking", False))
+            # Per-request toggle (use_reasoning) overrides the stored setting.
+            if enable_thinking_override is not None:
+                enable_thinking = enable_thinking_override
+            else:
+                enable_thinking = bool(llm_settings.get("enable_thinking", False))
             kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": enable_thinking}}
         if llm_settings.get("default_headers"):
             kwargs["default_headers"] = llm_settings["default_headers"]
@@ -796,7 +808,7 @@ class AgentService:
 
             # ── 2. Build LangChain model ──────────────────────────────
             yield _sse("agent_status", {"step": "init", "message": "Initializing model..."})
-            chat_model = _build_langchain_model(llm_settings)
+            chat_model = _build_langchain_model(llm_settings, enable_thinking_override=use_reasoning if use_reasoning else None)
 
             # Also build an AsyncOpenAI client for web_research (needs async)
             import httpx as _httpx
@@ -940,8 +952,7 @@ class AgentService:
                 if mcp_cfg.selected_endpoints:
                     endpoints_brief = format_endpoints_as_brief(mcp_cfg, product_name)
                     task_content = endpoints_brief + "\n\n" + task_content
-            if use_reasoning:
-                task_content = "Think through this carefully step by step before giving your answer.\n\n" + task
+
 
             initial_state: AgentState = {
                 "messages": [HumanMessage(content=task_content)],

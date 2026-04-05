@@ -65,7 +65,7 @@ class BrowserSession:
 
     async def get_axtree_nodes(self) -> list:
         """Extract interactive AX tree nodes with pixel coordinates."""
-        self.last_activity = __import__('datetime').datetime.utcnow()
+        self.last_activity = time.time()
         if not self.page:
             return []
         try:

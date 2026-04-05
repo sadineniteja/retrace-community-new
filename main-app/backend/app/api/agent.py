@@ -35,6 +35,7 @@ class AgentExecuteRequest(BaseModel):
     task: str = Field(..., min_length=1)
     max_iterations: int = Field(default=50, ge=1, le=100)
     conversation_id: Optional[str] = None
+    use_reasoning: bool = False
 
 
 class AgentSessionResponse(BaseModel):
@@ -129,6 +130,7 @@ async def execute_agent_task(
             session=session,
             max_iterations=request.max_iterations,
             thread_id=request.conversation_id,
+            use_reasoning=request.use_reasoning,
         ):
             yield event
 
